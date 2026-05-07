@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2026 The Pybricks Authors
+// Copyright (c) 2026 Lansing Tech Studio
 //
 // Localhost git bridge for the pybricks-git Chrome extension.
 //
