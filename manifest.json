@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "Pybricks Git",
+  "version": "0.0.1",
+  "description": "Version-control integration for code.pybricks.com",
+  "permissions": ["scripting", "storage"],
+  "host_permissions": [
+    "https://code.pybricks.com/*",
+    "http://localhost/*",
+    "http://127.0.0.1/*"
+  ],
+  "background": {
+    "service_worker": "src/background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://code.pybricks.com/*"],
+      "js": ["src/content.js"],
+      "run_at": "document_idle",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["https://code.pybricks.com/*"],
+      "js": ["src/inject.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
+    }
+  ],
+  "action": {
+    "default_title": "Pybricks Git"
+  }
+}
