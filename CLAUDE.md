@@ -81,7 +81,25 @@ cd server && go build -o /tmp/pb-git-server .
 # then refresh code.pybricks.com.
 ```
 
-There are no tests yet.
+## Tests
+
+```bash
+# Go server: hermetic — each test spins up a throwaway git repo under
+# t.TempDir() and shells out to the real `git`, so the suite doubles as
+# integration coverage of the git wiring. No flags needed.
+cd server && go test ./...
+
+# Extension JS: unit tests for src/inject.js (applyFiles diff + sha256) run on
+# Node's built-in test runner against fake-indexeddb (the only dev dependency).
+npm install   # once, pulls fake-indexeddb into gitignored node_modules
+npm test
+```
+
+Notes for changing tests:
+- `server/main_test.go` mutates the package-level `repoDir` global, so its tests **must not** run in parallel (no `t.Parallel()`). Each subtest gets its own temp repo via the `setupRepo` helper, which also forces branch `main` and a local git identity.
+- `test/load-inject.mjs` loads `src/inject.js` *unmodified* — it reads the file, appends a line publishing the internal functions onto `globalThis`, and runs it in one function scope. Don't add ESM `export`s to `inject.js` to make it testable; that would break it as a classic content script.
+- The `test` script globs `test/*.test.mjs` specifically so the `load-inject.mjs` helper isn't picked up as an (empty) test file.
+- `package.json` exists **only** for the JS tests — it's tooling, not shipped. The extension still loads unpacked with no build step.
 
 ## Things to know before changing things
 
