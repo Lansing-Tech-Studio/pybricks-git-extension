@@ -313,6 +313,18 @@ async function keepPending(d, deviceCode, rec) {
     }
 }
 
+// Writes a terminal (error/success) authFlow record only if this loop's flow is
+// still the pending one — same guard as keepPending. A loop parked in
+// delay/fetch can wake after a superseding start() (or a post-cancel idle
+// record) already replaced authFlow; an unconditional write would clobber that
+// newer record and silently strand the flow the user is now servicing.
+async function finishIfCurrent(d, deviceCode, rec) {
+    const cur = await d.storage.get('authFlow');
+    if (cur && cur.state === 'pending' && cur.deviceCode === deviceCode) {
+        await d.storage.set({ authFlow: rec });
+    }
+}
+
 // Polls GitHub for the token until the flow leaves the pending state. Each
 // tick starts by re-reading `authFlow` — the storage-driven abort described
 // above — and that recurring storage access is also what keeps the MV3 worker
@@ -339,12 +351,12 @@ async function pollLoop(d, deviceCode) {
                         grant_type: 'urn:ietf:params:oauth:grant-type:device_code',
                     }).toString(),
                 });
-                data = await res.json();
+                data = (await res.json()) ?? {}; // a null body must not throw outside the try
             } catch {
                 continue; // network hiccup — stay pending; expiresAt bounds the loop
             }
             if (data.access_token) {
-                await authSucceed(d, data.access_token);
+                await authSucceed(d, deviceCode, data.access_token);
                 return;
             }
             if (data.error === 'authorization_pending') {
@@ -353,13 +365,13 @@ async function pollLoop(d, deviceCode) {
                 rec.interval = data.interval ?? rec.interval + 5;
                 await keepPending(d, deviceCode, rec);
             } else if (data.error === 'expired_token') {
-                await d.storage.set({ authFlow: expiredAuthRecord() });
+                await finishIfCurrent(d, deviceCode, expiredAuthRecord());
                 return;
             } else if (data.error === 'access_denied') {
-                await d.storage.set({ authFlow: { state: 'error', message: 'Sign-in was denied on GitHub.' } });
+                await finishIfCurrent(d, deviceCode, { state: 'error', message: 'Sign-in was denied on GitHub.' });
                 return;
             } else if (data.error) {
-                await d.storage.set({ authFlow: { state: 'error', message: data.error } });
+                await finishIfCurrent(d, deviceCode, { state: 'error', message: data.error });
                 return;
             }
         }
@@ -372,7 +384,7 @@ async function pollLoop(d, deviceCode) {
 // Turns a fresh access token into stored credentials. The /user lookup is
 // best-effort: if it fails the token is still saved, with a team fallback
 // identity instead of the GitHub login.
-async function authSucceed(d, token) {
+async function authSucceed(d, deviceCode, token) {
     let login = null;
     try {
         const res = await d.fetch('https://api.github.com/user', {
@@ -391,7 +403,10 @@ async function authSucceed(d, token) {
             email: login ? `${login}@users.noreply.github.com` : 'team@users.noreply.github.com',
         },
     });
-    await d.storage.set({ authFlow: { state: 'success', login } });
+    // The token write above is unconditional — the user did authorize it — but
+    // the authFlow success flag is guarded so a superseded loop can't overwrite
+    // a newer flow's pending record.
+    await finishIfCurrent(d, deviceCode, { state: 'success', login });
 }
 
 // Raw settings read on purpose: getSettings() projects a fixed field list and
@@ -479,5 +494,5 @@ if (typeof importScripts === 'function') {
     chrome.runtime.onMessage.addListener(makeMessageHandler(engine, auth));
     // Every service-worker wake-up resumes a stranded pending device flow, so
     // sign-in completes even if the popup never reopens.
-    auth.status();
+    auth.status().catch(() => {});
 }

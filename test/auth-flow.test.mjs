@@ -75,6 +75,8 @@ function tokenPosts(fetch) {
     return fetch.calls.filter((c) => c.url === TOKEN_URL);
 }
 
+const jsonRes = (status, json) => ({ ok: status >= 200 && status < 300, status, json: async () => json });
+
 test('start() without a configured client_id fails with a clear message', async () => {
     const fetch = scriptedFetch();
     const flow = makeAuthFlow({ fetch, storage: memStorage(), clientId: '' });
@@ -275,6 +277,67 @@ test('signOut() clears credentials but keeps the repo config', async () => {
         login: '',
     });
     assert.deepEqual(await storage.get('authFlow'), { state: 'idle' });
+});
+
+test("a superseded loop's terminal error does not clobber a newer pending flow", async () => {
+    const storage = memStorage();
+    const clock = { now: 1_000_000 };
+
+    // dc1's access_denied token response is held behind this gate so the test
+    // can force the superseded loop to wake *after* dc2 has taken over authFlow.
+    let releaseDenied;
+    const deniedGate = new Promise((r) => { releaseDenied = r; });
+    let dc2Authorized = false; // dc2 stays pending until flipped, then hands over a token
+
+    const deviceCodes = ['dc1', 'dc2'];
+    const calls = [];
+    const fetch = async (url, init = {}) => {
+        const body = init.body ?? '';
+        calls.push({ url, body });
+        if (url === DEVICE_URL) {
+            const device_code = deviceCodes.shift();
+            return jsonRes(200, {
+                device_code, user_code: `${device_code}-CODE`,
+                verification_uri: 'https://github.com/login/device', expires_in: 900, interval: 5,
+            });
+        }
+        if (url === TOKEN_URL && body.includes('device_code=dc1')) {
+            await deniedGate; // parked until the test releases it
+            return jsonRes(200, { error: 'access_denied' });
+        }
+        if (url === TOKEN_URL && body.includes('device_code=dc2')) {
+            return jsonRes(200, dc2Authorized ? { access_token: 'gho_dc2' } : { error: 'authorization_pending' });
+        }
+        if (url === USER_URL) return jsonRes(200, { login: 'kid' });
+        return jsonRes(200, { error: 'authorization_pending' });
+    };
+    fetch.calls = calls;
+
+    const { delay } = recordingDelay();
+    const flow = makeAuthFlow({ fetch, storage, delay, now: () => clock.now, clientId: 'test-client' });
+
+    // Start dc1; its loop parks awaiting the denied gate on its first token poll.
+    await flow.start();
+    await waitFor(() => calls.some((c) => c.url === TOKEN_URL && c.body.includes('device_code=dc1')), 'dc1 token poll');
+
+    // User clicks Sign in again — supersede with dc2 before dc1's terminal wakes.
+    await flow.start();
+    await waitFor(async () => ((await storage.get('authFlow')) ?? {}).deviceCode === 'dc2', 'dc2 pending');
+
+    // Release dc1's access_denied. The superseded loop must NOT overwrite dc2.
+    releaseDenied();
+    await settle();
+    const rec = await storage.get('authFlow');
+    assert.equal(rec.state, 'pending');
+    assert.equal(rec.deviceCode, 'dc2');
+
+    // And dc2 can still complete normally.
+    dc2Authorized = true;
+    await waitFor(async () => ((await storage.get('authFlow')) ?? {}).state === 'success', 'dc2 success');
+    const s = await storage.get('settings');
+    assert.equal(s.token, 'gho_dc2');
+    assert.equal(s.login, 'kid');
+    assert.deepEqual(await storage.get('authFlow'), { state: 'success', login: 'kid' });
 });
 
 test('a failed /user lookup still stores the token with fallback identity', async () => {

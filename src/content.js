@@ -203,7 +203,7 @@ function serverRequest(op, payload = {}) {
 async function ensureConfigured(btn, original) {
     const status = await serverRequest('status');
     if (status.configured) return true;
-    console.warn('[pybricks-git] not configured — click the extension icon to set fork URL and token');
+    console.warn('[pybricks-git] not configured — click the extension icon to sign in with GitHub');
     btn.textContent = 'setup needed';
     setTimeout(() => (btn.textContent = original), 3000);
     return false;

@@ -10,6 +10,10 @@ async function saveForm(extra = {}) {
     const { settings = {} } = await chrome.storage.local.get('settings');
     const next = { ...settings, ...extra };
     for (const f of FIELDS) next[f] = $(f).value.trim();
+    // Empty token input = "no change", not "clear it": right after OAuth sign-in
+    // the field is blank until the next refresh, so Save/Test must keep the
+    // freshly stored token. Sign out is the way to clear the token.
+    if (!$('token').value.trim()) next.token = settings.token ?? '';
     if (!next.branch) next.branch = 'main';
     await chrome.storage.local.set({ settings: next });
     return next;
@@ -61,12 +65,16 @@ let prevSignedIn = false;
 async function refreshAuth() {
     const st = await send({ op: 'authStatus' });
     if (st.error) {
+        $('signIn').disabled = false;
         $('authState').textContent = st.error;
         $('status').textContent = st.error;
         return;
     }
     $('signedIn').hidden = !st.signedIn;
     $('signedOut').hidden = st.signedIn;
+    // Keep Sign in disabled while a flow is pending so a second click can't
+    // supersede the code the user is already typing; re-enable in every other state.
+    $('signIn').disabled = st.state === 'pending';
 
     if (st.state === 'pending') {
         $('devicePrompt').hidden = false;
@@ -88,9 +96,10 @@ async function refreshAuth() {
 }
 
 $('signIn').addEventListener('click', async () => {
+    $('signIn').disabled = true; // block a double-click superseding the flow mid-start
     const res = await send({ op: 'authStart' });
     if (res.error) $('status').textContent = res.error;
-    await refreshAuth();
+    await refreshAuth(); // reconciles the disabled state to the resulting flow state
 });
 
 $('cancelAuth').addEventListener('click', async () => {
