@@ -48,7 +48,13 @@ async function statusOp(d) {
 }
 
 // Fetches the remote branch tip into the cache gitdir. Returns its oid, or
-// null when the remote exists but has no commits yet (fresh fork edge case).
+// null when the branch has no commits yet (a fresh/empty fork, or a branch
+// that hasn't been pushed). Most hosts surface that as fetch resolving with
+// fetchHead: null (fetch goes through the registered `origin` remote, so no
+// throw); some throw "Could not find refs/heads/<branch>" instead — that one
+// message is the only failure we treat as empty. Every other fetch error
+// (404 wrong URL, 401 bad auth, empty/broken server response, etc.) is a real
+// failure and is rethrown so the user sees it rather than a false "no commits".
 async function fetchRemoteHead(d, s) {
     await d.git.init({ fs: d.fs, gitdir: d.gitdir, bare: true });
     // Register a named remote so fetch has a refspec to store the fetched ref
@@ -70,8 +76,8 @@ async function fetchRemoteHead(d, s) {
         return res.fetchHead ?? null;
     } catch (err) {
         const text = `${err && err.code} ${err && err.message}`;
-        if (/NotFoundError|NoRefSpecError|EmptyServerResponse|Could not find|no refs/i.test(text)) {
-            return null;
+        if (/Could not find refs\/heads\//i.test(text)) {
+            return null; // branch has no commits yet — treat as empty repo
         }
         throw err;
     }
