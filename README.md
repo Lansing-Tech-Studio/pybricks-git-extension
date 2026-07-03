@@ -34,7 +34,7 @@ Each team gets its own fork of a shared-code repository and its own token. A men
 | Action | What it does |
 |---|---|
 | Click **Commit** | Opens a message input under the button — **Enter** commits (blank message = timestamped default), **Escape** cancels. The extension fetches the fork's head, builds a commit from the editor's files, and pushes it. Button shows `✓ <short-sha> ↑` (committed and pushed), `no changes`, `setup needed` (extension not configured yet), or `error` (see the console). |
-| Click **Pull** | The extension fetches the fork and applies its files into the editor. Button shows `↓ +N ~N -N` (added / changed / deleted). When anything changed, the page reloads so the editor picks up the new files. |
+| Click **Pull** | The extension fetches the fork and applies its files into the editor. Button shows `↓ +N ~N -N` (added / changed / deleted), or `nothing to pull` when the fork has no commits on the configured branch yet (nothing is applied in that case). When anything changed, the page reloads so the editor picks up the new files. |
 
 ## Shared-code updates
 
