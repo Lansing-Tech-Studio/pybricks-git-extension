@@ -225,3 +225,41 @@ async function commitOp(d, msg) {
     }
     throw new Error(`push kept being rejected after 3 attempts: ${lastErr.message}`);
 }
+
+function makeMessageHandler(engine) {
+    return (msg, _sender, sendResponse) => {
+        const ops = {
+            status: () => engine.status(),
+            pull: () => engine.pull(),
+            commit: () => engine.commit({ files: msg.files, message: msg.message }),
+        };
+        const run = ops[msg && msg.op];
+        if (!run) {
+            sendResponse({ error: `unknown op: ${msg && msg.op}` });
+            return false;
+        }
+        run().then(sendResponse, (err) => sendResponse({ error: err.message }));
+        return true; // async sendResponse — keep the channel open
+    };
+}
+
+// --- Service-worker wiring (skipped when loaded by Node tests) ---
+if (typeof importScripts === 'function') {
+    importScripts(
+        '../vendor/isomorphic-git.umd.js',
+        '../vendor/isomorphic-git-http-web.umd.js',
+        '../vendor/lightning-fs.umd.js',
+    );
+    const storage = {
+        get: (key) => chrome.storage.local.get(key).then((o) => o[key]),
+        set: (obj) => chrome.storage.local.set(obj),
+    };
+    const engine = makeEngine({
+        git: self.git,
+        http: self.GitHttp,
+        fs: new self.LightningFS('pybricks-git'),
+        gitdir: '/pybricks.git',
+        storage,
+    });
+    chrome.runtime.onMessage.addListener(makeMessageHandler(engine));
+}
