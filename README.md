@@ -21,13 +21,30 @@ The extension performs Git itself: a vendored copy of [isomorphic-git](https://i
 
 ## Setup (fork-per-team)
 
-Each team gets its own fork of a shared-code repository and its own token. A mentor sets up the upstream repo once; each team does the rest.
+Each team gets its own fork of a shared-code repository. A mentor sets up the upstream repo once; each team does the rest.
 
 1. **Fork the shared repo.** The mentor maintains an upstream repository of shared starter code. Each team opens it on GitHub and clicks **Fork** to make their own copy.
-2. **Create a fine-grained personal access token (PAT).** On GitHub: *Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token*. Set **Repository access** to **Only select repositories** and choose **only the team's fork**. Under **Permissions → Repository permissions**, set **Contents: Read and write**. Generate the token and copy it (you only see it once).
-3. **Load the extension.** Open `chrome://extensions`, enable **Developer mode** (top right), click **Load unpacked**, and select this repository's root.
-4. **Configure the extension.** Click the Pybricks Git icon in the Chrome toolbar. Enter the fork URL, the token, and the team name, then click **Test connection** to confirm the token can reach the fork (this also records the GitHub identity that commits will be authored under). Click **Save**.
+2. **Load the extension.** Open `chrome://extensions`, enable **Developer mode** (top right), click **Load unpacked**, and select this repository's root.
+3. **Sign in with GitHub.** Click the Pybricks Git icon in the Chrome toolbar and click **Sign in with GitHub**. The popup shows a one-time code; open the link it gives you (`https://github.com/login/device`), enter the code, and authorize. The popup finishes on its own once GitHub hands over the token — you can even close it while you authorize; the sign-in completes in the background. This grants the `public_repo` scope, enough to push to a public fork.
+4. **Configure the fork.** In the same popup, enter the fork URL, the branch (defaults to `main`), and the team name. Click **Save**. Signing in records the GitHub identity that commits will be authored under; you can click **Test connection** to confirm the credentials can reach the fork.
 5. **Use it on code.pybricks.com.** Open or refresh `https://code.pybricks.com`. **Pull first** to bring the fork's starter code into the editor, then work, then **Commit** to push your changes back.
+
+### Advanced: paste a token instead
+
+Instead of signing in with GitHub, you can paste a fine-grained personal access token (PAT) under **Advanced: paste a token instead** in the popup. This is the fallback path — needed for **private** forks (the `public_repo` OAuth scope can't push to those) or when the OAuth App isn't available.
+
+On GitHub: *Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token*. Set **Repository access** to **Only select repositories** and choose **only the team's fork**. Under **Permissions → Repository permissions**, set **Contents: Read and write**. Generate the token and copy it (you only see it once), paste it into the Advanced field, then click **Test connection** and **Save**. Test connection confirms the token can reach the fork and records the GitHub identity commits will be authored under.
+
+### Maintainer setup: register the OAuth App (one-time)
+
+The **Sign in with GitHub** button needs a registered GitHub OAuth App. The maintainer does this once, then bakes the Client ID into the extension:
+
+1. On GitHub (the org that owns the shared repo, or a personal account): *Settings → Developer settings → OAuth Apps → New OAuth App*.
+2. **Application name:** `Pybricks Git`. **Homepage URL:** the repo URL. **Authorization callback URL:** the form requires it but device flow never uses it — enter the repo URL again.
+3. Check **Enable Device Flow**. No client secret is needed.
+4. Copy the **Client ID** and paste it into `GITHUB_CLIENT_ID` at the top of `src/background.js`, then reload the extension.
+
+Until a Client ID is set, `GITHUB_CLIENT_ID` is empty: **Sign in with GitHub** shows a clear error and the paste-a-token path still works.
 
 ## Usage
 
@@ -43,16 +60,15 @@ When the mentor updates the upstream shared repository, each team pulls the chan
 ## Known limitations
 
 - **The page reloads after a Pull that changes files.** Pybricks wraps Dexie with `dexie-observable`, and the extension's raw IndexedDB writes bypass its hook system, so React doesn't see them until a reload.
-- **The token is stored in `chrome.storage.local`.** That is device-local, but it is readable by anyone who can use that Chrome profile. Treat the fork's PAT accordingly (scope it to the single fork with Contents-only write, as in Setup).
+- **The credential is stored in `chrome.storage.local`.** Whether you sign in with GitHub (an OAuth token with the `public_repo` scope) or paste a PAT, it lands in `chrome.storage.local` — device-local, but readable by anyone who can use that Chrome profile. The OAuth token can be revoked any time at GitHub → *Settings → Applications*; a pasted PAT should be scoped to the single fork with Contents-only write, as in Setup.
 - **A Commit made before the first Pull preserves unknown files rather than deleting them.** Since the extension has no snapshot of what the fork contained, it won't delete starter code it has never seen. This is by design; the preserved paths are logged to the console.
 
 ## Roadmap
 
 In rough priority order:
 
-1. **GitHub Device Flow OAuth** — replace pasted PATs with a login flow so teams never handle a raw token.
-2. **Open-tab cleanup on delete** — when Pull deletes a file, also clean up its entry in Pybricks' "open tabs" state so the page doesn't log a non-fatal error after reload.
-3. **Chrome Web Store listing** — publish the extension so teams install it from the store, removing even the sideloading step.
+1. **Open-tab cleanup on delete** — when Pull deletes a file, also clean up its entry in Pybricks' "open tabs" state so the page doesn't log a non-fatal error after reload.
+2. **Chrome Web Store listing** — publish the extension so teams install it from the store, removing even the sideloading step.
 
 ## License
 
