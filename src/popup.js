@@ -23,7 +23,13 @@ $('save').addEventListener('click', async () => {
 $('test').addEventListener('click', async () => {
     $('status').textContent = 'Testing…';
     const s = await saveForm();
-    const match = s.repoUrl.match(/github\.com\/([^/]+)\/([^/.]+)/);
+    // Owner then repo; repo is lazy so an optional .git suffix and any trailing
+    // /, ?, # or end-of-string bound it without eating a dotted repo name.
+    //   github.com/team/robot.code       → team / robot.code
+    //   github.com/team/robot-code.git   → team / robot-code
+    //   github.com/team/robot-code/      → team / robot-code
+    //   (a URL with no github.com/owner/repo shape)  → no match (stays failed)
+    const match = s.repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:[/?#]|$)/);
     if (!match) {
         $('status').textContent = 'Fork URL must look like https://github.com/owner/repo';
         return;
