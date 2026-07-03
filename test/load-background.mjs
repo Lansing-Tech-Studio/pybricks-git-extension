@@ -9,7 +9,7 @@ const src = readFileSync(
 // importScripts is undefined in Node, so the service-worker wiring block
 // (guarded by `typeof importScripts === 'function'`) never runs here.
 const load = new Function(
-    `${src}\n;globalThis.__background = { makeEngine, makeMessageHandler: typeof makeMessageHandler === 'function' ? makeMessageHandler : undefined };`,
+    `${src}\n;globalThis.__background = { makeEngine, makeMessageHandler: typeof makeMessageHandler === 'function' ? makeMessageHandler : undefined, makeAuthFlow: typeof makeAuthFlow === 'function' ? makeAuthFlow : undefined };`,
 );
 load();
-export const { makeEngine, makeMessageHandler } = globalThis.__background;
+export const { makeEngine, makeMessageHandler, makeAuthFlow } = globalThis.__background;
