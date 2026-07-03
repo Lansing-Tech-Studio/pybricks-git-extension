@@ -34,7 +34,7 @@ function isConfigured(s) {
 
 function requireConfigured(s) {
     if (!isConfigured(s)) {
-        throw new Error('not configured — click the Pybricks Git extension icon to set fork URL and token');
+        throw new Error('not configured — click the Pybricks Git extension icon to sign in with GitHub');
     }
 }
 
@@ -432,12 +432,16 @@ async function authSignOutOp(d) {
     return { signedIn: false };
 }
 
-function makeMessageHandler(engine) {
+function makeMessageHandler(engine, auth) {
     return (msg, _sender, sendResponse) => {
         const ops = {
             status: () => engine.status(),
             pull: () => engine.pull(),
             commit: () => engine.commit({ files: msg.files, message: msg.message }),
+            authStart: () => auth.start(),
+            authStatus: () => auth.status(),
+            authCancel: () => auth.cancel(),
+            authSignOut: () => auth.signOut(),
         };
         const run = ops[msg && msg.op];
         if (!run) {
@@ -471,5 +475,9 @@ if (typeof importScripts === 'function') {
         gitdir: '/pybricks.git',
         storage,
     });
-    chrome.runtime.onMessage.addListener(makeMessageHandler(engine));
+    const auth = makeAuthFlow({ fetch: (...a) => fetch(...a), storage });
+    chrome.runtime.onMessage.addListener(makeMessageHandler(engine, auth));
+    // Every service-worker wake-up resumes a stranded pending device flow, so
+    // sign-in completes even if the popup never reopens.
+    auth.status();
 }
