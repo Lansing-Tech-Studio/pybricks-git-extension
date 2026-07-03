@@ -54,12 +54,14 @@ have to rediscover them:
 
 1. Starts the git harness with a seeded bare repo containing `starter.py`.
 2. Launches Chromium with the unpacked extension.
-3. Attaches to the extension **service_worker** target and writes settings via
+3. Attaches to the extension **service_worker** target, writes settings via
    `chrome.storage.local.set({settings:{repoUrl,branch,token,name,email}})`,
-   pointing `repoUrl` at the harness (`http://127.0.0.1:<port>/team.git`).
+   pointing `repoUrl` at the harness (`http://127.0.0.1:<port>/team.git`), and
+   captures `Runtime.exceptionThrown` on the SW (tagged `sw:`) — the git engine
+   runs in this target, so a throw there must not be invisible to the gate.
 4. Attaches to the `code.pybricks.com` page target, finds the extension's
    **isolated world** (`Runtime.executionContextCreated`, name `Pybricks Git`),
-   and captures `Runtime.exceptionThrown` from attach onward.
+   and captures `Runtime.exceptionThrown` (tagged `page:`) from attach onward.
 5. Waits for the toolbar buttons, dismisses the Welcome Tour, then **Pull**
    (trusted click) → asserts label `↓ +1 ~0 -0` → waits for reload →
    `pageRequest('list-files')` contains `starter.py`.
@@ -68,7 +70,8 @@ have to rediscover them:
    timeline `Committing…` → `✓ <sha> ↑`.
 7. Asserts harness-side: `bareSubjects` includes `e2e message`, `e2e.py` is in
    the bare repo, and `starter.py` is still present (first-commit guard held).
-8. Asserts zero **extension** exceptions and writes `toolbar.png`.
+8. Asserts zero **extension** exceptions across **both** the page and the
+   service worker, and writes `toolbar.png`.
 
 ## What PASS looks like
 
@@ -94,9 +97,9 @@ Recorded from a real passing run (Chromium 1194, `2026-07-03`):
 
 [e2e] === STEP 4: Seed a second file, then Commit with message "e2e message" ===
 [e2e] apply-files summary: { added: 1, changed: 0, deleted: 0, unchanged: 1 }
-[e2e] commit label timeline: [ 'Committing…', '✓ 3a7f1c5 ↑' ]
+[e2e] commit label timeline: [ 'Committing…', '✓ f74d29e ↑' ]
 [e2e] PASS: commit label showed "Committing…"
-[e2e] PASS: commit label shows "✓ <sha> ↑" (got "✓ 3a7f1c5 ↑")
+[e2e] PASS: commit label shows "✓ <sha> ↑" (got "✓ f74d29e ↑")
 
 [e2e] === STEP 5: Harness-side assertions on the pushed commit ===
 [e2e] bare subjects: [ 'e2e message', 'seed' ]
@@ -105,13 +108,13 @@ Recorded from a real passing run (Chromium 1194, `2026-07-03`):
 [e2e] PASS: e2e.py pushed to the bare repo
 [e2e] PASS: starter.py still present in the bare repo (first-commit guard held)
 
-[e2e] === STEP 6: Zero extension exceptions ===
+[e2e] === STEP 6: Zero extension exceptions (page + service worker) ===
 [e2e] PASS: zero extension exceptions (saw 0)
 
 [e2e] ================= PASS =================
 [e2e] Pull label:       ↓ +1 ~0 -0
-[e2e] Commit timeline:  Committing…  ->  ✓ 3a7f1c5 ↑
-[e2e] Commit head:      ✓ 3a7f1c5 ↑
+[e2e] Commit timeline:  Committing…  ->  ✓ f74d29e ↑
+[e2e] Commit head:      ✓ f74d29e ↑
 ```
 
 ### Label timelines (the load-bearing evidence)
@@ -119,10 +122,10 @@ Recorded from a real passing run (Chromium 1194, `2026-07-03`):
 | Action | Button label timeline |
 |---|---|
 | Pull   | `Pull` → `Pulling…` → `↓ +1 ~0 -0` → (page reloads) |
-| Commit | `Commit` → `Committing…` → `✓ 3a7f1c5 ↑` |
+| Commit | `Commit` → `Committing…` → `✓ f74d29e ↑` |
 
 `toolbar.png` (committed alongside this README) is the screenshot after the
-push: the Commit button reads `✓ 3a7f1c5 ↑`.
+push: the Commit button reads `✓ f74d29e ↑`.
 
 ## Bugs found
 

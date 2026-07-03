@@ -158,6 +158,14 @@ async function main() {
     };
 
     const evidence = { labels: {}, assertions: [] };
+    // Extension exceptions from BOTH targets end up here, each tagged with its
+    // source ("page:" or "sw:") so the zero-exceptions gate covers the service
+    // worker (where the git engine runs), not just the page. Declared in the
+    // outer scope so the catch block can print them as failure diagnostics.
+    const extExceptions = [];
+    const pageExceptions = [];
+    const exceptionSummary = (det = {}) =>
+        (det.exception && det.exception.description) || det.text || 'exception';
     const assert = (cond, msg) => {
         evidence.assertions.push({ ok: !!cond, msg });
         if (cond) log('PASS:', msg);
@@ -218,7 +226,17 @@ async function main() {
         log('service worker target:', swTarget.url);
 
         const sw = new CDP(swTarget.webSocketDebuggerUrl);
-        await sw.send('Runtime.enable');
+        // The extension's git engine runs in this service-worker target, so a
+        // throw here is invisible to the page listener. Capture it into the same
+        // extExceptions array (tagged "sw:") before any Pull/Commit interaction.
+        sw.onEvent((method, params) => {
+            if (method === 'Runtime.exceptionThrown') {
+                const summary = exceptionSummary(params.exceptionDetails);
+                extExceptions.push('sw: ' + summary);
+                log('EXTENSION EXCEPTION (sw):', summary.split('\n')[0]);
+            }
+        });
+        await sw.send('Runtime.enable'); // enables exceptionThrown on the SW too
         const settings = {
             repoUrl,
             branch: 'main',
@@ -258,8 +276,6 @@ async function main() {
         // Track the extension's isolated execution context; it is recreated on
         // reload, so keep the latest and clear it when contexts are wiped.
         let isolatedCtx = null;
-        const extExceptions = [];
-        const pageExceptions = [];
         page.onEvent((method, params) => {
             if (method === 'Runtime.executionContextCreated') {
                 const c = params.context;
@@ -283,16 +299,15 @@ async function main() {
                 const isExt =
                     /chrome-extension:\/\//.test(text) ||
                     /content\.js|inject\.js|background\.js/.test(text);
-                const summary =
-                    (det.exception && det.exception.description) ||
-                    det.text ||
-                    'exception';
-                (isExt ? extExceptions : pageExceptions).push(summary);
-                if (isExt) log('EXTENSION EXCEPTION:', summary.split('\n')[0]);
+                const summary = exceptionSummary(det);
+                (isExt ? extExceptions : pageExceptions).push(
+                    (isExt ? 'page: ' : '') + summary,
+                );
+                if (isExt) log('EXTENSION EXCEPTION (page):', summary.split('\n')[0]);
             }
         });
         await page.send('Page.enable');
-        await page.send('Runtime.enable'); // replays buffered contexts + exceptions
+        await page.send('Runtime.enable'); // replays execution contexts (not past exceptions)
 
         // Evaluate an expression in the isolated world (re-fetches ctx id).
         const evalIsolated = async (expression, awaitPromise = true) => {
@@ -588,13 +603,23 @@ async function main() {
         );
 
         // -- Exceptions -----------------------------------------------------
-        step(6, 'Zero extension exceptions');
+        // Covers BOTH the page (content.js/inject.js) and the service worker
+        // (background.js, where the git engine runs); entries are tagged
+        // "page:"/"sw:" so the source is unambiguous.
+        step(6, 'Zero extension exceptions (page + service worker)');
         if (pageExceptions.length) {
             log(`(note: ${pageExceptions.length} non-extension page exception(s) ignored)`);
         }
+        if (extExceptions.length) {
+            for (const e of extExceptions) log('  captured:', e.split('\n')[0]);
+        }
         assert(
             extExceptions.length === 0,
-            `zero extension exceptions (saw ${extExceptions.length})`,
+            `zero extension exceptions (saw ${extExceptions.length}${
+                extExceptions.length
+                    ? ': ' + extExceptions.map((e) => e.split('\n')[0]).join(' | ')
+                    : ''
+            })`,
         );
 
         // -- Screenshot -----------------------------------------------------
@@ -620,6 +645,14 @@ async function main() {
     } catch (err) {
         console.error('\n[e2e] ================= FAIL =================');
         console.error('[e2e]', err.stack || err.message);
+        // Surface any captured extension exceptions (page + service worker) as
+        // failure diagnostics — a throw in the SW git engine is a prime suspect.
+        if (extExceptions.length) {
+            console.error(
+                `[e2e] extension exceptions captured (${extExceptions.length}):`,
+            );
+            for (const e of extExceptions) console.error('[e2e]   ' + e.split('\n')[0]);
+        }
         // Try to grab a diagnostic screenshot if the page is reachable.
         try {
             const list = await fetchJSON(`http://127.0.0.1:${DEBUG_PORT}/json`, 1);
