@@ -111,7 +111,13 @@ async function pullOp(d) {
             files.push({ path, contents: new TextDecoder().decode(blob) });
         }
     }
-    await d.storage.set({ lastPullPaths: files.map((f) => f.path) });
+    // Only update the snapshot when the editor was actually shown a file set.
+    // An empty/missing-branch pull applies nothing (content.js skips it), so
+    // clobbering lastPullPaths to [] here would make the next Commit treat every
+    // previously-tracked path as known and delete it.
+    if (head) {
+        await d.storage.set({ lastPullPaths: files.map((f) => f.path) });
+    }
     return {
         head: head ? head.slice(0, 7) : '',
         files,

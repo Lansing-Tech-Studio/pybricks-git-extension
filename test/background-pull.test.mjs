@@ -76,6 +76,23 @@ test('pull from an empty repo warns but succeeds with no files', async () => {
     }
 });
 
+test('pull from an empty repo does NOT clobber a prior lastPullPaths snapshot', async () => {
+    // An empty/missing-branch pull shows the editor nothing, so it must not
+    // overwrite the last-Pull snapshot with []. Otherwise the next Commit would
+    // treat every previously-tracked path as "known" and delete it. (The empty
+    // list is also never applied to the editor — see content.js pull().)
+    const { engine, storage, server } = await setupEngine();
+    try {
+        await storage.set({ lastPullPaths: ['keep.py'] });
+        const result = await engine.pull();
+        assert.equal(result.files.length, 0);
+        assert.notEqual(result.pullWarning, '');
+        assert.deepEqual(await storage.get('lastPullPaths'), ['keep.py']);
+    } finally {
+        await server.close();
+    }
+});
+
 test('pull against a nonexistent repo URL rejects instead of reporting an empty repo', async () => {
     const { engine, storage, server } = await setupEngine();
     try {

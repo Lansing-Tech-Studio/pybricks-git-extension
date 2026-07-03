@@ -152,8 +152,17 @@ async function pull(btn) {
         if (!(await ensureConfigured(btn, original))) return;
 
         const result = await serverRequest('pull');
+        // An empty/missing-branch pull (no head → non-empty pullWarning) returns
+        // files:[]. Applying that would DELETE every file in the editor, since
+        // apply-files diffs the payload as the complete desired state. Skip the
+        // apply entirely — the editor keeps what it has. NOTE: a fork that has
+        // commits but zero .py files has head set and pullWarning empty, so it
+        // still applies normally (emptying the editor by design, 1:1 tracking).
         if (result.pullWarning) {
-            console.warn('[pybricks-git] pull warning:', result.pullWarning);
+            console.warn('[pybricks-git] pull skipped:', result.pullWarning);
+            btn.textContent = 'nothing to pull';
+            setTimeout(() => (btn.textContent = original), 3000);
+            return;
         }
         console.log(`[pybricks-git] received ${result.files.length} file(s)`);
 
