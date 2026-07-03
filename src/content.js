@@ -87,16 +87,26 @@ function promptCommitMessage(btn) {
         font: 'inherit',
         zIndex: 10000,
     });
+    // Removing a focused element fires blur, and the blur listener below
+    // removes the input re-entrantly — a plain input.remove() in the keydown
+    // handler then throws NotFoundError before commit() runs. The guard makes
+    // close() idempotent so whichever event fires first wins cleanly.
+    let closed = false;
+    const close = () => {
+        if (closed) return;
+        closed = true;
+        input.remove();
+    };
     input.addEventListener('keydown', (event) => {
         if (event.key === 'Enter') {
             const message = input.value.trim();
-            input.remove();
+            close();
             commit(btn, message);
         } else if (event.key === 'Escape') {
-            input.remove();
+            close();
         }
     });
-    input.addEventListener('blur', () => input.remove());
+    input.addEventListener('blur', close);
     document.body.appendChild(input);
     input.focus();
 }
