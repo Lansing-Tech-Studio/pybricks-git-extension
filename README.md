@@ -2,80 +2,57 @@
 
 A Chrome extension that adds Git version control to [code.pybricks.com](https://code.pybricks.com) — the hosted Pybricks editor for LEGO Powered Up hubs.
 
-> **Status: prototype.** The commit, push, and pull round-trip works against a local git repository (and its remote, if one is configured). Nothing is ready for classroom deployment yet. See [Roadmap](#roadmap) for what's next.
-
 ## Why this exists
 
-Pybricks Code is a great in-browser editor, but every program lives in IndexedDB inside one browser profile on one machine. There's no version history, no way to share a starter file with a team, no way to recover yesterday's working program. This extension wraps the deployed site (without forking it) and adds a Git workflow on top: commit your current set of files, pull updates from disk back into the editor.
+Pybricks Code is a great in-browser editor, but every program lives in IndexedDB inside one browser profile on one machine. There's no version history, no way to share a starter file with a team, no way to recover yesterday's working program. This extension wraps the deployed site (without forking it) and adds a Git workflow on top: commit your current set of files to your team's GitHub repository, and pull updates from GitHub back into the editor.
 
 It works equally well for block-based programs and Python programs — block files are stored as `.py` files with their workspace JSON in a line-1 comment, so Git just sees text.
 
 ## Current capabilities
 
-- **Commit button** in the editor toolbar — prompts for a commit message (blank = auto-timestamped), writes every file from IndexedDB into a local git working tree, then `git commit`.
-- **Push after commit** — if the repo has a remote, every commit is followed by `git push` using whatever credentials the machine already has (SSH agent, credential helper). No remote configured is fine; push is silently skipped.
-- **Pull button** — reads the local git working tree and applies changes back into IndexedDB (adds new files, updates changed ones, deletes removed ones). Preserves Monaco scroll/cursor state and file UUIDs on update.
-- **Works on both program types** — Python and block files round-trip identically; the extension treats `_contents.contents` as opaque text.
-- **No remote required** for local-only testing — commits stay local and push is skipped until you add a remote.
+- **Commit button** in the editor toolbar — prompts for a commit message (blank = auto-timestamped), then commits *and pushes* every file from the editor straight to your team's GitHub fork.
+- **Pull button** — fetches the fork and applies its files back into the editor: adds new files, updates changed ones, deletes removed ones. Monaco scroll/cursor state and file identities (UUIDs) are preserved on update.
+- **Works on both program types** — Python and block programs round-trip identically; the extension treats the file body as opaque text.
+- **No local server, no install** — the extension does the Git work itself, entirely in the browser. It runs on anything that can sideload a Chrome extension, **including Chromebooks**.
 
-## Roadmap
+## How it works
 
-In rough priority order:
+The extension performs Git itself: a vendored copy of [isomorphic-git](https://isomorphic-git.org) runs in the extension's service worker and speaks GitHub's HTTPS Git protocol directly. Every Commit is built on the freshly fetched remote head, so there is no local clone that can drift or get corrupted — the service worker fetches, builds the new tree, commits, and pushes in one shot. A snapshot of the last Pull guards the first Commit against deleting a fork's starter code it has never seen.
 
-1. **Native messaging host** — replaces the localhost server with a Chrome native-messaging binary, removing the "start the server" step. The `native-host/` directory has a placeholder manifest.
-2. **Open-tab cleanup on delete** — when Pull deletes a file, also clean up its entry in Pybricks' "open tabs" state so the page doesn't log a non-fatal error after reload.
-3. **Classroom credential story** — push currently rides on the host machine's git credentials, which is fine for a developer setup but not for a shared classroom machine.
-4. **ChromeOS deployment story** — managed Chromebooks block both sideloaded extensions and Crostini, which kills the current architecture for school district deployments. Open question: enterprise force-install + remote git proxy, or a Tauri desktop wrapper.
-5. **Multi-user / classroom features** — per-student branches, mentor review workflow.
+## Setup (fork-per-team)
 
-## Install
+Each team gets its own fork of a shared-code repository and its own token. A mentor sets up the upstream repo once; each team does the rest.
 
-You need both halves running: the extension in Chrome, and the Go server on the same machine.
-
-### Extension
-
-1. Open `chrome://extensions`, enable **Developer mode** (top right).
-2. Click **Load unpacked** and select this repository's root.
-3. Open or refresh `https://code.pybricks.com`. You should see **Commit** and **Pull** buttons in the editor toolbar.
-
-### Server
-
-Requires Go 1.22+ and a git working tree.
-
-```bash
-# Once: create or clone the repo you want to sync to.
-mkdir -p ~/pybricks-classroom && cd ~/pybricks-classroom && git init -q
-git commit --allow-empty -m "init"   # required for an empty repo
-
-# Each session: start the server.
-cd path/to/pybricks-git-extension/server
-go run . --repo ~/pybricks-classroom
-# → listening on http://127.0.0.1:8127, repo=..., branch=main
-```
-
-Leave the server running while you use Pybricks Code.
+1. **Fork the shared repo.** The mentor maintains an upstream repository of shared starter code. Each team opens it on GitHub and clicks **Fork** to make their own copy.
+2. **Create a fine-grained personal access token (PAT).** On GitHub: *Settings → Developer settings → Personal access tokens → Fine-grained tokens → Generate new token*. Set **Repository access** to **Only select repositories** and choose **only the team's fork**. Under **Permissions → Repository permissions**, set **Contents: Read and write**. Generate the token and copy it (you only see it once).
+3. **Load the extension.** Open `chrome://extensions`, enable **Developer mode** (top right), click **Load unpacked**, and select this repository's root.
+4. **Configure the extension.** Click the Pybricks Git icon in the Chrome toolbar. Enter the fork URL, the token, and the team name, then click **Test connection** to confirm the token can reach the fork (this also records the GitHub identity that commits will be authored under). Click **Save**.
+5. **Use it on code.pybricks.com.** Open or refresh `https://code.pybricks.com`. **Pull first** to bring the fork's starter code into the editor, then work, then **Commit** to push your changes back.
 
 ## Usage
 
 | Action | What it does |
 |---|---|
-| Click **Commit** | Opens a message input under the button — **Enter** commits (blank message = timestamped default), **Escape** cancels. The server writes every file from IndexedDB into the working tree, creates a commit, then pushes if a remote is configured. Button shows `✓ <short-sha> ↑` (committed and pushed), `✓ <short-sha>` (no remote), `no changes`, or `… push failed` (commit succeeded, push didn't — see the console). |
-| Click **Pull** | Server runs `git pull --ff-only` (skipped if no remote is configured), reads the working tree, returns the file list. Extension applies it to IndexedDB and reloads the page. Button shows `↓ +N ~N -N` (added / changed / deleted). |
+| Click **Commit** | Opens a message input under the button — **Enter** commits (blank message = timestamped default), **Escape** cancels. The extension fetches the fork's head, builds a commit from the editor's files, and pushes it. Button shows `✓ <short-sha> ↑` (committed and pushed), `no changes`, `setup needed` (extension not configured yet), or `error` (see the console). |
+| Click **Pull** | The extension fetches the fork and applies its files into the editor. Button shows `↓ +N ~N -N` (added / changed / deleted). When anything changed, the page reloads so the editor picks up the new files. |
 
-## Architecture
+## Shared-code updates
 
-Three tiers: a Chrome extension content script reads/writes the page's IndexedDB directly; an HTTP server on `127.0.0.1` performs git operations against a working tree on disk; the two communicate via simple JSON endpoints. The extension is plain JavaScript with no build step. The server is a single-file Go program with stdlib only.
-
-Detailed architecture, the IndexedDB schema we discovered, and gotchas (especially around `dexie-observable` and the page's COEP header) are documented in [CLAUDE.md](CLAUDE.md).
+When the mentor updates the upstream shared repository, each team pulls the changes into their own fork by pressing **Sync fork** on GitHub (on the fork's page), then clicking **Pull** in the editor to bring them into Pybricks.
 
 ## Known limitations
 
-- **Page reloads after Pull.** Pybricks wraps Dexie with `dexie-observable`; our raw-IndexedDB writes bypass its hook system, so React doesn't see them until a reload. This is a deliberate prototype choice — fixable later.
-- **Single working tree per server.** The server is configured with one `--repo` flag at startup. Multi-repo support would need an endpoint to switch context.
-- **No auth on the localhost server.** Fine because it binds to `127.0.0.1` only, but anything on the local machine can reach it.
-- **Push uses the host's git credentials.** The server just runs `git push`; if the machine's SSH agent or credential helper can't reach the remote, the push fails (the commit still succeeds locally).
-- **ChromeOS is unsupported.** See roadmap.
-- **WSL note.** The server can run inside WSL2 and Chrome on Windows can still reach it — Windows forwards `127.0.0.1` listeners automatically. Don't bind to `0.0.0.0`.
+- **The page reloads after a Pull that changes files.** Pybricks wraps Dexie with `dexie-observable`, and the extension's raw IndexedDB writes bypass its hook system, so React doesn't see them until a reload.
+- **The token is stored in `chrome.storage.local`.** That is device-local, but it is readable by anyone who can use that Chrome profile. Treat the fork's PAT accordingly (scope it to the single fork with Contents-only write, as in Setup).
+- **A Commit made before the first Pull preserves unknown files rather than deleting them.** Since the extension has no snapshot of what the fork contained, it won't delete starter code it has never seen. This is by design; the preserved paths are logged to the console.
+
+## Roadmap
+
+In rough priority order:
+
+1. **GitHub Device Flow OAuth** — replace pasted PATs with a login flow so teams never handle a raw token.
+2. **Open-tab cleanup on delete** — when Pull deletes a file, also clean up its entry in Pybricks' "open tabs" state so the page doesn't log a non-fatal error after reload.
+3. **Chrome Web Store listing** — publish the extension so teams install it from the store, removing even the sideloading step.
 
 ## License
 

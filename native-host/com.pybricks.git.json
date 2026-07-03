@@ -1,9 +1,0 @@
-{
-  "name": "com.pybricks.git",
-  "description": "Pybricks Git native messaging host (stub)",
-  "path": "REPLACE_WITH_ABSOLUTE_PATH_TO_HOST_BINARY",
-  "type": "stdio",
-  "allowed_origins": [
-    "chrome-extension://REPLACE_WITH_EXTENSION_ID/"
-  ]
-}
