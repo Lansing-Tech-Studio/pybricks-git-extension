@@ -62,6 +62,7 @@ If this becomes painful, the fix paths are (in order of effort): bundle Dexie in
 | `GET /files` | Walks `--repo` for every `.py`, returns `[{path, contents}]`. |
 | `POST /commit` | Body `{files, message}`. Writes files to working tree (deletes `.py` files not in payload, leaves non-`.py` alone), `git add -A`, `git commit` if there's a diff. Empty `message` → `Update from Pybricks at <RFC3339>`. |
 | `POST /pull` | `git pull --ff-only` then return `{head, files, pullWarning}`. `pullWarning` is non-empty when no remote/upstream is configured — caller still applies the working-tree state. |
+| `POST /push` | No remote → `{pushed: false, pushWarning}` (mirrors `/pull` tolerance). Otherwise `git push -u origin HEAD`; success → `{pushed: true}`, failure → 500 with git's output. Auth rides on the host's existing git credentials (SSH agent, credential helper) — there is deliberately no credential handling in the server. |
 
 CORS is wide-open (`*`); fine because the server binds to `127.0.0.1` only. **The `Cross-Origin-Resource-Policy: cross-origin` response header is mandatory** — `code.pybricks.com` sets `Cross-Origin-Embedder-Policy: require-corp`, so without CORP on our responses, fetches from the page context get blocked.
 

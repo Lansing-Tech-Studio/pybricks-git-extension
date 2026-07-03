@@ -390,6 +390,110 @@ func TestPullNoRemoteWarnsButReturnsFiles(t *testing.T) {
 	}
 }
 
+// --- /push ---
+
+// setupBareRemote creates a bare repo in a temp dir and adds it as `origin`
+// of the current test repo.
+func setupBareRemote(t *testing.T, dir string) string {
+	t.Helper()
+	bare := t.TempDir()
+	if resolved, err := filepath.EvalSymlinks(bare); err == nil {
+		bare = resolved
+	}
+	runGit(t, bare, "init", "-q", "--bare")
+	runGit(t, dir, "remote", "add", "origin", bare)
+	return bare
+}
+
+func TestPushNoRemoteWarns(t *testing.T) {
+	dir := setupRepo(t)
+	writeFile(t, dir, "main.py", "print(1)\n")
+	commitAll(t, dir, "seed")
+
+	code, resp := callJSON(t, withCORS(handlePush), http.MethodPost, "/push", nil)
+	if code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (resp %v)", code, resp)
+	}
+	if resp["pushed"] != false {
+		t.Errorf("pushed = %v, want false with no remote", resp["pushed"])
+	}
+	warn, _ := resp["pushWarning"].(string)
+	if warn == "" {
+		t.Errorf("expected a non-empty pushWarning when no remote is configured")
+	}
+}
+
+func TestPushToBareRemote(t *testing.T) {
+	dir := setupRepo(t)
+	bare := setupBareRemote(t, dir)
+	writeFile(t, dir, "main.py", "print(1)\n")
+	commitAll(t, dir, "seed")
+
+	code, resp := callJSON(t, withCORS(handlePush), http.MethodPost, "/push", nil)
+	if code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (resp %v)", code, resp)
+	}
+	if resp["pushed"] != true {
+		t.Errorf("pushed = %v, want true", resp["pushed"])
+	}
+	localHead := runGit(t, dir, "rev-parse", "HEAD")
+	remoteHead := runGit(t, bare, "rev-parse", "refs/heads/main")
+	if localHead != remoteHead {
+		t.Errorf("remote head = %s, want %s", remoteHead, localHead)
+	}
+
+	// A second push with a new commit must also land (upstream already set).
+	writeFile(t, dir, "main.py", "print(2)\n")
+	commitAll(t, dir, "second")
+	code, resp = callJSON(t, withCORS(handlePush), http.MethodPost, "/push", nil)
+	if code != http.StatusOK || resp["pushed"] != true {
+		t.Fatalf("second push: code %d resp %v", code, resp)
+	}
+	if got := runGit(t, bare, "rev-parse", "refs/heads/main"); got != runGit(t, dir, "rev-parse", "HEAD") {
+		t.Errorf("remote head not advanced on second push")
+	}
+}
+
+func TestPushDivergedRemoteFails(t *testing.T) {
+	dir := setupRepo(t)
+	bare := setupBareRemote(t, dir)
+	writeFile(t, dir, "main.py", "print(1)\n")
+	commitAll(t, dir, "seed")
+	runGit(t, dir, "push", "-q", "-u", "origin", "HEAD")
+
+	// Advance the remote through a second clone so the local repo is behind.
+	clone := t.TempDir()
+	runGit(t, clone, "clone", "-q", bare, "work")
+	work := filepath.Join(clone, "work")
+	runGit(t, work, "config", "user.email", "other@example.com")
+	runGit(t, work, "config", "user.name", "Other")
+	runGit(t, work, "config", "commit.gpgsign", "false")
+	writeFile(t, work, "main.py", "print('remote')\n")
+	commitAll(t, work, "remote change")
+	runGit(t, work, "push", "-q", "origin", "HEAD")
+
+	// Diverge locally.
+	writeFile(t, dir, "main.py", "print('local')\n")
+	commitAll(t, dir, "local change")
+
+	code, resp := callJSON(t, withCORS(handlePush), http.MethodPost, "/push", nil)
+	if code != http.StatusInternalServerError {
+		t.Fatalf("code = %d, want 500 for non-fast-forward push (resp %v)", code, resp)
+	}
+	errMsg, _ := resp["error"].(string)
+	if errMsg == "" {
+		t.Errorf("expected error message in response")
+	}
+}
+
+func TestPushMethodNotAllowed(t *testing.T) {
+	setupRepo(t)
+	code, _ := callJSON(t, withCORS(handlePush), http.MethodGet, "/push", nil)
+	if code != http.StatusMethodNotAllowed {
+		t.Fatalf("code = %d, want 405 for GET", code)
+	}
+}
+
 // --- CORS plumbing ---
 
 func TestWithCORSHeaders(t *testing.T) {

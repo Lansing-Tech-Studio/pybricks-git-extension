@@ -36,7 +36,7 @@ async function mountButton() {
     if (toolbar.querySelector('[data-pybricks-git]')) return;
 
     const commitBtn = makeBtn('Commit', 'Pybricks Git: commit current files');
-    commitBtn.addEventListener('click', () => commit(commitBtn));
+    commitBtn.addEventListener('click', () => promptCommitMessage(commitBtn));
 
     const pullBtn = makeBtn('Pull', 'Pybricks Git: pull from disk into editor');
     pullBtn.addEventListener('click', () => pull(pullBtn));
@@ -63,7 +63,55 @@ function makeBtn(label, title) {
     return btn;
 }
 
-async function commit(btn) {
+// Shows a one-line message input under the Commit button. Enter commits with
+// the typed message (blank keeps the server's timestamped default), Escape or
+// clicking elsewhere cancels without committing.
+function promptCommitMessage(btn) {
+    if (document.querySelector('[data-pybricks-git-msg]')) return;
+
+    const input = document.createElement('input');
+    input.dataset.pybricksGitMsg = '1';
+    input.type = 'text';
+    input.placeholder = 'Commit message (blank = timestamped)';
+    const rect = btn.getBoundingClientRect();
+    Object.assign(input.style, {
+        position: 'fixed',
+        left: `${rect.left}px`,
+        top: `${rect.bottom + 4}px`,
+        width: '280px',
+        padding: '6px 8px',
+        background: '#2d2d30',
+        color: '#ddd',
+        border: '1px solid #555',
+        borderRadius: '4px',
+        font: 'inherit',
+        zIndex: 10000,
+    });
+    // Removing a focused element fires blur, and the blur listener below
+    // removes the input re-entrantly — a plain input.remove() in the keydown
+    // handler then throws NotFoundError before commit() runs. The guard makes
+    // close() idempotent so whichever event fires first wins cleanly.
+    let closed = false;
+    const close = () => {
+        if (closed) return;
+        closed = true;
+        input.remove();
+    };
+    input.addEventListener('keydown', (event) => {
+        if (event.key === 'Enter') {
+            const message = input.value.trim();
+            close();
+            commit(btn, message);
+        } else if (event.key === 'Escape') {
+            close();
+        }
+    });
+    input.addEventListener('blur', close);
+    document.body.appendChild(input);
+    input.focus();
+}
+
+async function commit(btn, message) {
     const original = btn.textContent;
     btn.textContent = 'Committing…';
     btn.disabled = true;
@@ -84,10 +132,27 @@ async function commit(btn) {
         const result = await fetchJSON(`${SERVER}/commit`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ files, message: '' }),
+            body: JSON.stringify({ files, message }),
         });
         console.log('[pybricks-git] commit result:', result);
-        btn.textContent = result.committed ? `✓ ${result.head}` : 'no changes';
+        const label = result.committed ? `✓ ${result.head}` : 'no changes';
+
+        // 4. Push — even when nothing new was committed, so commits stranded
+        // by an earlier failed push still go up. A failed push must not mask
+        // the successful commit.
+        let pushSuffix = '';
+        try {
+            const push = await fetchJSON(`${SERVER}/push`, { method: 'POST' });
+            if (push.pushed) {
+                pushSuffix = ' ↑';
+            } else if (push.pushWarning) {
+                console.warn('[pybricks-git] push skipped:', push.pushWarning);
+            }
+        } catch (pushErr) {
+            console.error('[pybricks-git] push failed (commit succeeded):', pushErr);
+            pushSuffix = ' push failed';
+        }
+        btn.textContent = label + pushSuffix;
         setTimeout(() => (btn.textContent = original), 3000);
     } catch (err) {
         console.error('[pybricks-git] commit failed:', err);
