@@ -119,6 +119,109 @@ async function pullOp(d) {
     };
 }
 
+// Git sorts tree entries as if directory names had a trailing slash.
+function treeSortKey(entry) {
+    return entry.type === 'tree' ? `${entry.path}/` : entry.path;
+}
+
+// Writes a full git tree (bottom-up) from a flat Map of path -> {oid, mode}.
+async function writeTreeFromMap(d, fileMap) {
+    const root = {};
+    for (const [path, entry] of fileMap) {
+        const parts = path.split('/');
+        let node = root;
+        for (const part of parts.slice(0, -1)) node = node[part] ??= {};
+        node[parts[parts.length - 1]] = entry;
+    }
+    async function writeDir(node) {
+        const entries = [];
+        for (const [name, child] of Object.entries(node)) {
+            if (child.oid) {
+                entries.push({ mode: child.mode, path: name, oid: child.oid, type: 'blob' });
+            } else {
+                entries.push({ mode: '040000', path: name, oid: await writeDir(child), type: 'tree' });
+            }
+        }
+        entries.sort((a, b) => (treeSortKey(a) < treeSortKey(b) ? -1 : 1));
+        return d.git.writeTree({ fs: d.fs, gitdir: d.gitdir, tree: entries });
+    }
+    return writeDir(root);
+}
+
 async function commitOp(d, msg) {
-    throw new Error('commit not implemented yet');
+    const files = msg.files ?? [];
+    const s = await getSettings(d);
+    requireConfigured(s);
+    const snapshot = new Set((await d.storage.get('lastPullPaths')) ?? []);
+    let lastErr;
+    for (let attempt = 0; attempt < 3; attempt++) {
+        const head = await fetchRemoteHead(d, s);
+        if (!head && files.length === 0) {
+            return { committed: false, head: '', message: 'no changes', pushed: false, preserved: [] };
+        }
+        const existing = await listAllFiles(d, head);
+        const next = new Map(existing);
+        const preserved = [];
+        for (const path of existing.keys()) {
+            if (!path.endsWith('.py')) continue;
+            if (files.some((f) => f.path === path)) continue;
+            // Delete only what a previous Pull showed the editor; never-pulled
+            // files (fresh fork starter code) are preserved.
+            if (snapshot.has(path)) next.delete(path);
+            else preserved.push(path);
+        }
+        for (const f of files) {
+            const oid = await d.git.writeBlob({
+                fs: d.fs,
+                gitdir: d.gitdir,
+                blob: new TextEncoder().encode(f.contents),
+            });
+            next.set(f.path, { oid, mode: '100644' });
+        }
+        const newTree = await writeTreeFromMap(d, next);
+        const oldTree = head
+            ? (await d.git.readCommit({ fs: d.fs, gitdir: d.gitdir, oid: head })).commit.tree
+            : null;
+        if (newTree === oldTree) {
+            return { committed: false, head: head.slice(0, 7), message: 'no changes', pushed: false, preserved };
+        }
+        const message = (msg.message ?? '').trim() || `Update from Pybricks at ${new Date(d.now()).toISOString()}`;
+        const author = {
+            name: s.name || 'Pybricks Team',
+            email: s.email || 'team@users.noreply.github.com',
+            timestamp: Math.floor(d.now() / 1000),
+            timezoneOffset: 0,
+        };
+        const commitOid = await d.git.writeCommit({
+            fs: d.fs,
+            gitdir: d.gitdir,
+            commit: { message, tree: newTree, parent: head ? [head] : [], author, committer: author },
+        });
+        await d.git.writeRef({
+            fs: d.fs,
+            gitdir: d.gitdir,
+            ref: `refs/heads/${s.branch}`,
+            value: commitOid,
+            force: true,
+        });
+        try {
+            await d.git.push({
+                fs: d.fs,
+                http: d.http,
+                gitdir: d.gitdir,
+                url: s.repoUrl,
+                ref: s.branch,
+                remoteRef: `refs/heads/${s.branch}`,
+                onAuth: onAuth(s),
+            });
+            return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved };
+        } catch (err) {
+            if (err && err.code === 'PushRejectedError') {
+                lastErr = err; // someone else pushed between our fetch and push — rebuild on the new head
+                continue;
+            }
+            throw err;
+        }
+    }
+    throw new Error(`push kept being rejected after 3 attempts: ${lastErr.message}`);
 }
