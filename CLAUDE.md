@@ -32,14 +32,14 @@ Everything runs in the browser; the only external party is `github.com`:
 | `status` | — | `{ok, configured, branch, head: null}` |
 | `commit` | `{files, message}` | `{committed, head, message, pushed, preserved}` |
 | `pull` | — | `{head, files, pullWarning}` |
-| `authStart` | — | `{state, userCode, verificationUri, expiresAt, interval}` (or throws → `{error}` when no client_id) |
+| `authStart` | — | `{state, userCode, verificationUri, expiresAt, interval}` (or throws → `{error}` when no client_id is configured or the device-code endpoint fails) |
 | `authStatus` | — | `{state, signedIn, login, userCode?, verificationUri?, expiresAt?, message?}` (last four only per state) |
 | `authCancel` | — | `{state: 'idle'}` |
 | `authSignOut` | — | `{signedIn: false}` |
 
 **Settings** live in `chrome.storage.local` under the key `settings`: `{repoUrl, branch, token, name, email, login}`, set via the action popup (`src/popup.html` / `popup.js`). `token` is either a GitHub OAuth token (from **Sign in with GitHub**, Device Flow) or a fine-grained PAT pasted under the popup's **Advanced** section. `login` is the GitHub login, set by OAuth sign-in and empty for pasted PATs. `email` is derived from the login (`<login>@users.noreply.github.com`, or `team@users.noreply.github.com` when unknown) during sign-in or **Test connection**, not typed. `branch` defaults to `main`. **Sign out** clears `token`/`email`/`login` but keeps `repoUrl`/`branch`/`name`.
 
-The engine keeps two more keys: `lastPullPaths` — the snapshot described under "The git engine" — and `authFlow`, the Device Flow state machine (`{state, ...}` with states `idle` / `pending` / `success` / `error`; a `pending` record also carries `deviceCode`, `userCode`, `verificationUri`, `expiresAt`, `interval`). The poll loop is storage-driven off this key so it survives service-worker kills; cancel/sign-out overwrite it with `{state: 'idle'}` (there is no storage `remove`).
+The engine keeps two more keys: `lastPullPaths` — the snapshot described under "The git engine" — and `authFlow`, the Device Flow state machine (`{state, ...}` with states `idle` / `pending` / `success` / `error`; a `pending` record also carries `deviceCode`, `userCode`, `verificationUri`, `expiresAt`, `interval`, `startedAt`). The poll loop is storage-driven off this key so it survives service-worker kills; cancel/sign-out overwrite it with `{state: 'idle'}` (there is no storage `remove`).
 
 ## Pybricks IndexedDB schema
 
