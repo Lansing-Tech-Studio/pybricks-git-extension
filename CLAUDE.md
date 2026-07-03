@@ -88,7 +88,7 @@ There is no build step and nothing to run alongside the extension — the git wo
 
 ## Tests
 
-`npm test` runs Node's built-in test runner over `test/*.test.mjs`. The suite covers `src/inject.js` (the IndexedDB `applyFiles` diff + sha256) and `src/background.js` (the git engine end-to-end). **A real `git` binary of version ≥ 2.28 is required** — the background tests push and fetch against a live local git server, and 2.28 is the first release whose `http-backend` the harness relies on.
+`npm test` runs Node's built-in test runner over `test/*.test.mjs`. The suite covers `src/inject.js` (the IndexedDB `applyFiles` diff + sha256) and `src/background.js` (the git engine end-to-end). **A real `git` binary of version ≥ 2.28 is required** — the harness seeds bare repos with `git init -b main` (`test/git-http-server.mjs`), and `-b`/`--initial-branch` first shipped in git 2.28.
 
 - `test/git-http-server.mjs` is a hermetic git smart-HTTP server: it fronts `git http-backend` (CGI) with a Node `http` server bound to `127.0.0.1:0` (random port), serving throwaway bare repos. This is what the engine's fetch/push actually talk to, so the background suite doubles as integration coverage of the GitHub wire protocol.
 - `test/load-background.mjs` loads `src/background.js` *unmodified* — it reads the file and evaluates it in a `Function` scope that publishes `makeEngine` / `makeMessageHandler` onto `globalThis`. The service-worker wiring block is skipped because `importScripts` is undefined in Node. Same rule as `inject.js`: **don't add ESM `export`s** to `background.js`; that would break it as a classic service worker.
@@ -101,5 +101,6 @@ There is no build step and nothing to run alongside the extension — the git wo
 
 - `code.pybricks.com` sets **no CSP**, so script/style/eval restrictions are not a constraint. COEP/COOP are present (for `SharedArrayBuffer` / `crossOriginIsolated`, which Pyodide needs) but they don't bind extension behavior — the git traffic goes out of the service worker to `github.com`, not through the page context, so there is no cross-origin-isolation constraint to satisfy.
 - The extension is plain JS, no build step. If you add a bundler, output to `dist/` (gitignored) and update `manifest.json` paths.
+- `manifest.json` keeps `http://127.0.0.1/*` in `host_permissions` **on purpose** — the browser E2E driver (`test/e2e/`) points the extension at a local `git http-backend` server, and that grant is what lets the service worker fetch/push against it. Production traffic only ever goes to `github.com`; leave the localhost grant in place for the E2E path.
 - The token lives in `chrome.storage.local` (device-local, but readable by anyone using the Chrome profile). Keep it there for now; the roadmap replaces pasted PATs with GitHub Device Flow OAuth.
 - ChromeOS: **unmanaged** Chromebooks now work — the whole product is a sideloaded extension with no server or Crostini requirement, so "Load unpacked" (or a future Web Store install) is all that's needed. **Managed** Chromebooks are still the open risk: they block sideloaded extensions, so those need the Web Store listing plus an admin force-install policy.

@@ -63,8 +63,9 @@ function makeBtn(label, title) {
 }
 
 // Shows a one-line message input under the Commit button. Enter commits with
-// the typed message (blank keeps the server's timestamped default), Escape or
-// clicking elsewhere cancels without committing.
+// the typed message (blank falls back to the timestamped default the extension
+// service worker generates), Escape or clicking elsewhere cancels without
+// committing.
 function promptCommitMessage(btn) {
     if (document.querySelector('[data-pybricks-git-msg]')) return;
 

@@ -13,7 +13,7 @@ It works equally well for block-based programs and Python programs — block fil
 - **Commit button** in the editor toolbar — prompts for a commit message (blank = auto-timestamped), then commits *and pushes* every file from the editor straight to your team's GitHub fork.
 - **Pull button** — fetches the fork and applies its files back into the editor: adds new files, updates changed ones, deletes removed ones. Monaco scroll/cursor state and file identities (UUIDs) are preserved on update.
 - **Works on both program types** — Python and block programs round-trip identically; the extension treats the file body as opaque text.
-- **No local server, no install** — the extension does the Git work itself, entirely in the browser. It runs on anything that can sideload a Chrome extension, **including Chromebooks**.
+- **No local server, no install** — the extension does the Git work itself, entirely in the browser. It runs on anything that can sideload a Chrome extension, **including unmanaged (personal) Chromebooks** via Load-unpacked. Managed (school-district) Chromebooks block Load-unpacked, so those need the future Web Store listing plus an admin force-install policy.
 
 ## How it works
 

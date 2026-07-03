@@ -47,8 +47,8 @@ Same shapes as the old HTTP endpoints so `content.js` changes are confined to th
 | op | request | response |
 |---|---|---|
 | `status` | `{}` | `{ok, branch, head, configured}` (`configured:false` → button error directs to settings) |
-| `commit` | `{files:[{path,contents}], message}` | `{committed, head, message, pushed, pushWarning?}` |
-| `pull` | `{}` | `{head, files:[{path,contents}], pullWarning}` |
+| `commit` | `{files:[{path,contents}], message}` | `{committed, head, message, pushed, preserved: string[]}` |
+| `pull` | `{}` | `{head, files:[{path,contents}], pullWarning}` (empty fork → `pullWarning` set, `files:[]`; a repo/branch that can't be found now **rejects with an error** rather than being reported as empty — an improvement over the original "repo/branch not found or empty" wording below) |
 
 `commit` folds in the push (the extension already chains them today; doing it in one op avoids a second service-worker round trip).
 
