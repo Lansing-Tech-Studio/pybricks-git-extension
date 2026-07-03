@@ -32,6 +32,18 @@ test('engine failures come back as {error} instead of hanging', async () => {
     assert.deepEqual(await call(handler, { op: 'pull' }), { error: 'boom' });
 });
 
+test('non-Error rejections still come back as a stringified {error}', async () => {
+    // A throw of a plain string has no .message, so {error: err.message} was
+    // {error: undefined} — which content.js treats as success. Stringify it.
+    const handler = makeMessageHandler({
+        ...fakeEngine,
+        pull: async () => {
+            throw 'plain string boom';
+        },
+    });
+    assert.deepEqual(await call(handler, { op: 'pull' }), { error: 'plain string boom' });
+});
+
 test('unknown ops come back as {error} synchronously', () => {
     const handler = makeMessageHandler(fakeEngine);
     let got;

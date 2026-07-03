@@ -244,7 +244,11 @@ function makeMessageHandler(engine) {
             sendResponse({ error: `unknown op: ${msg && msg.op}` });
             return false;
         }
-        run().then(sendResponse, (err) => sendResponse({ error: err.message }));
+        run().then(sendResponse, (err) =>
+            // A non-Error throw has no .message; {error: undefined} reads as
+            // success on the content side, so coerce to a non-empty string.
+            sendResponse({ error: String(err && err.message ? err.message : err) }),
+        );
         return true; // async sendResponse — keep the channel open
     };
 }
