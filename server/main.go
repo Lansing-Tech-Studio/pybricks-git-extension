@@ -3,13 +3,15 @@
 //
 // Localhost git bridge for the pybricks-git Chrome extension.
 //
-//   go run . --repo /path/to/your/git/repo [--port 8127]
+//	go run . --repo /path/to/your/git/repo [--port 8127]
 //
 // Endpoints:
-//   GET  /status      → { ok, branch, dirty, head }
-//   GET  /files       → [{ path, contents }]   (every .py in the repo)
-//   POST /commit      → write files, git add+commit, return { head }
-//   POST /pull        → git pull, return new file list
+//
+//	GET  /status      → { ok, branch, dirty, head }
+//	GET  /files       → [{ path, contents }]   (every .py in the repo)
+//	POST /commit      → write files, git add+commit, return { head }
+//	POST /pull        → git pull, return new file list
+//	POST /push        → git push to origin (host credentials), return { pushed }
 package main
 
 import (
@@ -62,6 +64,7 @@ func main() {
 	mux.HandleFunc("/files", withCORS(handleFiles))
 	mux.HandleFunc("/commit", withCORS(handleCommit))
 	mux.HandleFunc("/pull", withCORS(handlePull))
+	mux.HandleFunc("/push", withCORS(handlePush))
 
 	addr := fmt.Sprintf("127.0.0.1:%d", *port)
 	branch, _ := currentBranch()
@@ -200,6 +203,34 @@ func handlePull(w http.ResponseWriter, _ *http.Request) {
 		"files":       files,
 		"pullWarning": pullWarning,
 	})
+}
+
+func handlePush(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, errors.New("POST required"))
+		return
+	}
+	// No remote configured is a normal local-only setup, not an error —
+	// mirror /pull's tolerance and let the caller show a soft warning.
+	remotes, err := gitOutput("remote")
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if remotes == "" {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"pushed":      false,
+			"pushWarning": "no remote configured",
+		})
+		return
+	}
+	// -u sets the upstream on the first push; harmless afterwards. Auth comes
+	// from whatever the host already has (SSH agent, credential helper).
+	if _, err := gitOutput("push", "-u", "origin", "HEAD"); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"pushed": true})
 }
 
 // --- Filesystem ---
