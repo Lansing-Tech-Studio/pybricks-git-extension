@@ -54,4 +54,56 @@ $('test').addEventListener('click', async () => {
     }
 });
 
+const send = (msg) => chrome.runtime.sendMessage(msg);
+
+let prevSignedIn = false;
+
+async function refreshAuth() {
+    const st = await send({ op: 'authStatus' });
+    if (st.error) {
+        $('authState').textContent = st.error;
+        $('status').textContent = st.error;
+        return;
+    }
+    $('signedIn').hidden = !st.signedIn;
+    $('signedOut').hidden = st.signedIn;
+
+    if (st.state === 'pending') {
+        $('devicePrompt').hidden = false;
+        $('verifyLink').href = st.verificationUri;
+        $('verifyLink').textContent = st.verificationUri;
+        $('userCode').textContent = st.userCode;
+        $('authState').textContent = 'Waiting for GitHub…';
+    } else if (st.state === 'error') {
+        $('devicePrompt').hidden = false;
+        $('authState').textContent = st.message || 'Sign-in failed.';
+    } else {
+        $('devicePrompt').hidden = true;
+    }
+
+    $('whoami').textContent = st.login ? `Signed in as ${st.login}` : 'Using pasted token';
+
+    if (st.signedIn && !prevSignedIn) loadForm();
+    prevSignedIn = st.signedIn;
+}
+
+$('signIn').addEventListener('click', async () => {
+    const res = await send({ op: 'authStart' });
+    if (res.error) $('status').textContent = res.error;
+    await refreshAuth();
+});
+
+$('cancelAuth').addEventListener('click', async () => {
+    await send({ op: 'authCancel' });
+    await refreshAuth();
+});
+
+$('signOut').addEventListener('click', async () => {
+    await send({ op: 'authSignOut' });
+    await refreshAuth();
+    await loadForm();
+});
+
 loadForm();
+refreshAuth();
+setInterval(refreshAuth, 2000);
