@@ -1,9 +1,8 @@
 // ISOLATED-world content script: injects the Git toolbar button and bridges
-// requests to inject.js (MAIN world) and to the local Go server.
+// requests to inject.js (MAIN world) and to the extension service worker.
 
 const REQ = 'pybricks-git:request';
 const RES = 'pybricks-git:response';
-const SERVER = 'http://localhost:8127';
 
 let nextId = 1;
 const pending = new Map();
@@ -64,8 +63,9 @@ function makeBtn(label, title) {
 }
 
 // Shows a one-line message input under the Commit button. Enter commits with
-// the typed message (blank keeps the server's timestamped default), Escape or
-// clicking elsewhere cancels without committing.
+// the typed message (blank falls back to the timestamped default the extension
+// service worker generates), Escape or clicking elsewhere cancels without
+// committing.
 function promptCommitMessage(btn) {
     if (document.querySelector('[data-pybricks-git-msg]')) return;
 
@@ -112,47 +112,29 @@ function promptCommitMessage(btn) {
 }
 
 async function commit(btn, message) {
-    const original = btn.textContent;
+    const original = 'Commit';
     btn.textContent = 'Committing…';
     btn.disabled = true;
     try {
-        // 1. Verify the Go server is up.
-        const status = await fetchJSON(`${SERVER}/status`);
-        console.log('[pybricks-git] server status:', status);
+        if (!(await ensureConfigured(btn, original))) return;
 
-        // 2. Read every file from the page's IndexedDB via inject.js.
         const data = await pageRequest('list-files');
         const files = data.contents.map((c) => ({
             path: c.path,
             contents: c.contents,
         }));
-        console.log(`[pybricks-git] sending ${files.length} file(s) to server`);
+        console.log(`[pybricks-git] committing ${files.length} file(s)`);
 
-        // 3. Send to /commit.
-        const result = await fetchJSON(`${SERVER}/commit`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ files, message }),
-        });
+        const result = await serverRequest('commit', { files, message });
         console.log('[pybricks-git] commit result:', result);
-        const label = result.committed ? `✓ ${result.head}` : 'no changes';
-
-        // 4. Push — even when nothing new was committed, so commits stranded
-        // by an earlier failed push still go up. A failed push must not mask
-        // the successful commit.
-        let pushSuffix = '';
-        try {
-            const push = await fetchJSON(`${SERVER}/push`, { method: 'POST' });
-            if (push.pushed) {
-                pushSuffix = ' ↑';
-            } else if (push.pushWarning) {
-                console.warn('[pybricks-git] push skipped:', push.pushWarning);
-            }
-        } catch (pushErr) {
-            console.error('[pybricks-git] push failed (commit succeeded):', pushErr);
-            pushSuffix = ' push failed';
+        if (result.preserved && result.preserved.length) {
+            console.warn(
+                '[pybricks-git] kept files never seen by a Pull (fork starter code?):',
+                result.preserved,
+            );
         }
-        btn.textContent = label + pushSuffix;
+        const label = result.committed ? `✓ ${result.head}` : 'no changes';
+        btn.textContent = label + (result.pushed ? ' ↑' : '');
         setTimeout(() => (btn.textContent = original), 3000);
     } catch (err) {
         console.error('[pybricks-git] commit failed:', err);
@@ -164,23 +146,26 @@ async function commit(btn, message) {
 }
 
 async function pull(btn) {
-    const original = btn.textContent;
+    const original = 'Pull';
     btn.textContent = 'Pulling…';
     btn.disabled = true;
     try {
-        const status = await fetchJSON(`${SERVER}/status`);
-        console.log('[pybricks-git] server status:', status);
+        if (!(await ensureConfigured(btn, original))) return;
 
-        const result = await fetchJSON(`${SERVER}/pull`);
+        const result = await serverRequest('pull');
+        // An empty/missing-branch pull (no head → non-empty pullWarning) returns
+        // files:[]. Applying that would DELETE every file in the editor, since
+        // apply-files diffs the payload as the complete desired state. Skip the
+        // apply entirely — the editor keeps what it has. NOTE: a fork that has
+        // commits but zero .py files has head set and pullWarning empty, so it
+        // still applies normally (emptying the editor by design, 1:1 tracking).
         if (result.pullWarning) {
-            console.warn(
-                '[pybricks-git] git pull skipped/failed (continuing with working-tree state):',
-                result.pullWarning,
-            );
+            console.warn('[pybricks-git] pull skipped:', result.pullWarning);
+            btn.textContent = 'nothing to pull';
+            setTimeout(() => (btn.textContent = original), 3000);
+            return;
         }
-        console.log(
-            `[pybricks-git] received ${result.files.length} file(s) from server`,
-        );
+        console.log(`[pybricks-git] received ${result.files.length} file(s)`);
 
         const summary = await pageRequest('apply-files', { files: result.files });
         console.log('[pybricks-git] applied:', summary);
@@ -202,19 +187,26 @@ async function pull(btn) {
     }
 }
 
-async function fetchJSON(url, init) {
-    const r = await fetch(url, init);
-    const text = await r.text();
-    let body;
-    try {
-        body = text ? JSON.parse(text) : {};
-    } catch {
-        throw new Error(`${url}: non-JSON response (${r.status}): ${text.slice(0, 200)}`);
-    }
-    if (!r.ok) {
-        throw new Error(`${url}: ${r.status} ${body.error || text.slice(0, 200)}`);
-    }
-    return body;
+function serverRequest(op, payload = {}) {
+    return new Promise((resolve, reject) => {
+        chrome.runtime.sendMessage({ op, ...payload }, (res) => {
+            if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
+            if (!res) return reject(new Error('no response from the extension service worker'));
+            if (res.error) return reject(new Error(res.error));
+            resolve(res);
+        });
+    });
+}
+
+// Shows 'setup needed' on the button when settings are missing; returns false
+// so the caller can bail out of the operation.
+async function ensureConfigured(btn, original) {
+    const status = await serverRequest('status');
+    if (status.configured) return true;
+    console.warn('[pybricks-git] not configured — click the extension icon to set fork URL and token');
+    btn.textContent = 'setup needed';
+    setTimeout(() => (btn.textContent = original), 3000);
+    return false;
 }
 
 function waitFor(predicate, { interval = 200, timeout = 15000 } = {}) {

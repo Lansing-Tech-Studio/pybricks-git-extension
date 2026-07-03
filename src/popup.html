@@ -1,0 +1,26 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>Pybricks Git settings</title>
+<style>
+    body { font: 13px system-ui, sans-serif; min-width: 320px; padding: 12px; }
+    label { display: block; margin: 8px 0 2px; font-weight: 600; }
+    input { width: 100%; box-sizing: border-box; padding: 4px 6px; }
+    button { margin: 12px 8px 0 0; padding: 6px 12px; }
+    #status { margin-top: 10px; white-space: pre-wrap; }
+</style>
+<label>Fork URL
+    <input id="repoUrl" placeholder="https://github.com/your-team/robot-code" />
+</label>
+<label>Branch
+    <input id="branch" placeholder="main" />
+</label>
+<label>GitHub token (fine-grained, this fork only, Contents read/write)
+    <input id="token" type="password" />
+</label>
+<label>Team name
+    <input id="name" placeholder="Team Rocket" />
+</label>
+<button id="save">Save</button>
+<button id="test">Test connection</button>
+<div id="status"></div>
+<script src="popup.js"></script>
