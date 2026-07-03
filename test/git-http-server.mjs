@@ -94,7 +94,10 @@ export function bareHead(bare) {
 }
 
 export function bareFile(bare, path) {
-    return execFileSync('git', ['-C', bare, 'show', `main:${path}`], { encoding: 'utf8' });
+    // stderr captured (not inherited) so that tests which assert a file is ABSENT
+    // via assert.throws(() => bareFile(...)) don't leak git's "fatal: path ... does
+    // not exist" onto the test output. execFileSync still throws on non-zero exit.
+    return execFileSync('git', ['-C', bare, 'show', `main:${path}`], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
 }
 
 export function bareSubjects(bare) {
