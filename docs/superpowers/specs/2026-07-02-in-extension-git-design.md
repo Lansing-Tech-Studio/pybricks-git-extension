@@ -16,15 +16,13 @@ MV3 extensions with `host_permissions` bypass CORS, so a pure-JS git implementat
 
 The extension itself performs git: fetch/commit/push against a GitHub repo over HTTPS. The Commit and Pull toolbar buttons keep their current behavior and labels; only the machinery underneath changes.
 
-## Repo model: one shared repo, folder per team
+## Repo model: fork per team
 
-One club-owned GitHub repository holds all teams. Each device maps 1-to-1 to a team and is configured with a **team folder** (path prefix). A device only ever reads and writes files under its own folder:
+Brendon maintains an upstream club repo containing shared starter code (`.py` programs). Each team **forks** it into their own repo; each device maps 1-to-1 to a team and is configured with that fork's URL. The shared code is *starter code — theirs to evolve*: after the first Pull it lives in the team's Pybricks editor, and from then on the fork's `.py` contents track the editor 1:1 (edits, additions, deletions).
 
-- **Commit** replaces the contents of `<team>/` with the editor's files (writes every payload `.py`, deletes tracked `.py` files under `<team>/` that aren't in the payload, never touches anything outside the folder).
-- **Pull** returns only files under `<team>/`, with the prefix stripped, so each device round-trips exactly its own team's programs.
-- An empty team folder means "repo root", which transparently covers a future one-repo-per-team setup if we ever switch.
-
-Known limitation, accepted: GitHub tokens are repo-scoped, not folder-scoped, so any device's token could technically write other teams' folders. Git history makes that visible; acceptable for a club.
+- **Isolation for free:** a team's PAT is scoped to their own fork, so no device can touch another team's repo or the upstream. Damaging shared code is impossible outside your own fork.
+- **Shared-code updates** flow through GitHub's *Sync fork* button (mentor-driven), then the team's next Pull picks them up. Out of scope for the extension.
+- **First-commit guard:** Commit's delete semantics ("`.py` files absent from the editor payload get deleted") would let a commit-before-first-Pull wipe the starter code out of a fresh fork. Guard: the extension remembers the set of paths returned by the last Pull (`chrome.storage.local`), and **Commit only deletes paths that appeared in that snapshot**. Never-pulled files are preserved (with a note in the response), so a fresh device's first Commit adds the editor's files without touching starter code. The natural flow — Pull first, then work — behaves exactly as today.
 
 ## Architecture
 
@@ -56,20 +54,20 @@ Same shapes as the old HTTP endpoints so `content.js` changes are confined to th
 
 ### Git engine behavior (background.js) — stateless commits
 
-Because a device only ever *replaces its own folder*, the engine never maintains a checked-out working tree or a long-lived local branch. Every operation starts from the remote's current head:
+The engine never maintains a checked-out working tree or a long-lived local branch. Every operation starts from the remote's current head:
 
-- **commit op:** fetch the remote branch head → build a new tree that is byte-identical to the head's tree except `<team>/` is replaced by the payload (low-level `writeBlob`/`writeTree`) → if the new tree equals the old one, report `committed:false` (nothing to push — a stateless engine cannot strand commits) → otherwise `writeCommit` with the fetched head as parent and author from settings → push. **If the push loses a race** to another team, refetch and rebuild from the new head (the payload is still in hand) — bounded retry (3 attempts), and since teams touch disjoint paths the retry always converges.
-- **pull op:** fetch the remote head, read `<team>/` files from its tree, return them. There is no local branch to fast-forward, so the old non-ff failure mode disappears; `pullWarning` survives only for "repo/branch not found or empty".
+- **commit op:** fetch the remote branch head → build a new tree from the head's tree: every payload `.py` written, `.py` files absent from the payload deleted *only if they were in the last-Pull snapshot* (first-commit guard above), non-`.py` files untouched (low-level `writeBlob`/`writeTree`) → if the new tree equals the old one, report `committed:false` (nothing to push — a stateless engine cannot strand commits) → otherwise `writeCommit` with the fetched head as parent and author from settings → push. **If the push loses a race** (e.g. two devices on one fork, or a Sync-fork landing mid-commit), refetch and rebuild from the new head (the payload is still in hand) — bounded retry (3 attempts).
+- **pull op:** fetch the remote head, read its `.py` files, store the path set as the last-Pull snapshot, return the files. There is no local branch to fast-forward, so the old non-ff failure mode disappears; `pullWarning` survives only for "repo/branch not found or empty".
 - **Object store:** isomorphic-git still needs a filesystem for fetched objects, so a bare gitdir lives in lightning-fs as a *cache* (makes refetches incremental). It holds no working tree and no unpushed state; any inconsistency is handled by wiping and refetching — self-healing by construction.
 - **Message text is opaque:** empty commit message gets the same `Update from Pybricks at <RFC3339>` default, generated in the service worker now.
 - **Block files remain opaque text** — the line-1 workspace JSON round-trips byte-for-byte, exactly as CLAUDE.md requires.
 
 ### Settings & auth
 
-- Action popup (`src/popup.html` + `src/popup.js`, plain JS/DOM): repo URL, branch (default `main`), **team folder**, fine-grained GitHub PAT, display name (team name), **Test connection** button.
+- Action popup (`src/popup.html` + `src/popup.js`, plain JS/DOM): fork URL, branch (default `main`), fine-grained GitHub PAT, display name (team name), **Test connection** button.
 - Test connection calls `api.github.com` to validate the token against the repo and stores the derived commit email (`<login>@users.noreply.github.com`).
 - Everything in `chrome.storage.local`. A PAT there is readable by anyone with access to the machine profile — acceptable for the club prototype and documented in README. GitHub Device Flow OAuth is a future upgrade, out of scope here.
-- PAT guidance for students (README): fine-grained token, single repository, Contents read/write, nothing else.
+- PAT guidance for students (README): fine-grained token, single repository (their fork only), Contents read/write, nothing else.
 
 ### Manifest changes
 
@@ -86,11 +84,11 @@ A commit+push of a handful of `.py` files completes in single-digit seconds, wel
 
 - **`native-host/` is deleted.** This design supersedes native messaging entirely.
 - **`server/` is deleted** (the Go server and its tests) — the extension no longer has any localhost path, and git history preserves the code. The repo becomes single-language (plain JS) with `npm test` as the only suite.
-- **README/CLAUDE.md** get the new architecture, the shared-repo/team-folder setup guide, the PAT guidance, and a rewritten roadmap (native messaging removed; Device Flow OAuth and open-tab cleanup remain).
+- **README/CLAUDE.md** get the new architecture, the fork-per-team setup guide (fork upstream → create PAT → configure popup → Pull first), and a rewritten roadmap (native messaging removed; Device Flow OAuth and open-tab cleanup remain).
 
 ## Testing
 
-- **Git engine integration tests (Node, `node:test`):** isomorphic-git runs natively in Node. The harness serves a bare repo in a temp dir through `git http-backend` (CGI) fronted by a tiny Node HTTP server — a real smart-HTTP remote, hermetic, requiring only the `git` binary. Tests cover: first commit to an empty repo, commit with custom/default message, no-change no-op, folder scoping (writes/deletes confined to `<team>/`, other teams' folders and non-`.py` files untouched), pull returns only the team's files with prefix stripped, push advances remote head, **race retry** (interleave a competing push between fetch and push, assert the retry converges and both teams' work survives), block-file byte round-trip.
+- **Git engine integration tests (Node, `node:test`):** isomorphic-git runs natively in Node. The harness serves a bare repo in a temp dir through `git http-backend` (CGI) fronted by a tiny Node HTTP server — a real smart-HTTP remote, hermetic, requiring only the `git` binary. Tests cover: first commit to an empty repo, commit with custom/default message, no-change no-op, **first-commit guard** (commit before any pull preserves starter `.py` files; after a pull, absent files are deleted), non-`.py` files never touched, pull returns all `.py` files and records the snapshot, push advances remote head, **race retry** (interleave a competing push between fetch and push, assert the retry converges and both changes survive), block-file byte round-trip.
 - **`background.js` stays testable unmodified** via the same loader pattern as `test/load-inject.mjs`: read the file, stub `importScripts`/`chrome.*`, publish internals to `globalThis`.
 - **Browser verification:** the headless-Chromium CDP recipe (memory: `browser-e2e-recipe`) drives the real UI against a local `git http-backend` remote; trusted input pipeline, screenshot evidence.
 
@@ -98,10 +96,11 @@ A commit+push of a handful of `.py` files completes in single-digit seconds, wel
 
 - ~500 KB vendored JS in a deliberately lean repo (dev-tooling precedent already accepted; these ship, but no build step is introduced).
 - PAT in `chrome.storage.local` (documented; Device Flow later).
-- Tokens are repo-scoped, not folder-scoped — any device can technically write outside its team folder (visible in history; accepted).
+- The last-Pull snapshot is the engine's only persistent state besides settings; losing it (cleared storage) degrades safely — deletions stop propagating until the next Pull, nothing is destroyed.
 - isomorphic-git is maintenance-mode-ish upstream; pinned vendored version, small API surface used.
 
 ## Decisions (confirmed with Brendon, 2026-07-02)
 
-1. **Repo model:** one shared club repo, folder per team, device↔team 1-to-1. Empty team folder = repo root, which covers a per-team-repo setup if it's ever wanted instead.
-2. **Go server deleted** along with `native-host/`; the extension is the whole product.
+1. **Repo model:** fork per team from Brendon's upstream shared-code repo, device↔team 1-to-1. Shared code is starter code the team evolves; forking (not folders) is the isolation boundary, chosen to prevent accidental damage to shared code.
+2. **Shared code behavior:** *starter code — theirs to evolve* (whole-fork ↔ editor round-trip, with the first-commit guard).
+3. **Go server deleted** along with `native-host/`; the extension is the whole product.
