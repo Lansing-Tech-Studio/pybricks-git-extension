@@ -36,6 +36,7 @@ Everything runs in the browser; the only external party is `github.com`:
 | `authStatus` | — | `{state, signedIn, login, userCode?, verificationUri?, expiresAt?, message?}` (last four only per state) |
 | `authCancel` | — | `{state: 'idle'}` |
 | `authSignOut` | — | `{signedIn: false}` |
+| `openPopup` | — | `{opened: true}` (opens the action popup via `chrome.action.openPopup()`; `{error}` when Chrome refuses, e.g. a popup is already open) |
 
 **Settings** live in `chrome.storage.local` under the key `settings`: `{repoUrl, branch, token, name, email, login}`, set via the action popup (`src/popup.html` / `popup.js`). `token` is either a GitHub OAuth token (from **Sign in with GitHub**, Device Flow) or a fine-grained PAT pasted under the popup's **Advanced** section. `login` is the GitHub login, set by OAuth sign-in and empty for pasted PATs. `email` is derived from the login (`<login>@users.noreply.github.com`, or `team@users.noreply.github.com` when unknown) during sign-in or **Test connection**, not typed. `branch` defaults to `main`. **Sign out** clears `token`/`email`/`login` but keeps `repoUrl`/`branch`/`name`.
 

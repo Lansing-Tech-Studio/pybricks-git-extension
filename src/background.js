@@ -447,7 +447,7 @@ async function authSignOutOp(d) {
     return { signedIn: false };
 }
 
-function makeMessageHandler(engine, auth) {
+function makeMessageHandler(engine, auth, ui = {}) {
     return (msg, _sender, sendResponse) => {
         const ops = {
             status: () => engine.status(),
@@ -457,6 +457,10 @@ function makeMessageHandler(engine, auth) {
             authStatus: () => auth.status(),
             authCancel: () => auth.cancel(),
             authSignOut: () => auth.signOut(),
+            openPopup: async () => {
+                await ui.openPopup();
+                return { opened: true };
+            },
         };
         const run = ops[msg && msg.op];
         if (!run) {
@@ -491,7 +495,10 @@ if (typeof importScripts === 'function') {
         storage,
     });
     const auth = makeAuthFlow({ fetch: (...a) => fetch(...a), storage });
-    chrome.runtime.onMessage.addListener(makeMessageHandler(engine, auth));
+    // chrome.action.openPopup() opens the settings popup for the active
+    // window (available to all extensions since Chrome 127).
+    const ui = { openPopup: () => chrome.action.openPopup() };
+    chrome.runtime.onMessage.addListener(makeMessageHandler(engine, auth, ui));
     // Every service-worker wake-up resumes a stranded pending device flow, so
     // sign-in completes even if the popup never reopens.
     auth.status().catch(() => {});

@@ -74,9 +74,13 @@ function promptCommitMessage(btn) {
     input.type = 'text';
     input.placeholder = 'Commit message (blank = timestamped)';
     const rect = btn.getBoundingClientRect();
+    // The buttons sit at the right end of the toolbar, so anchoring the input's
+    // left edge to the button pushes it off-screen. Clamp it into the viewport.
+    const boxWidth = 298; // 280px width + 16px padding + 2px border
+    const left = Math.max(8, Math.min(rect.left, window.innerWidth - boxWidth - 8));
     Object.assign(input.style, {
         position: 'fixed',
-        left: `${rect.left}px`,
+        left: `${left}px`,
         top: `${rect.bottom + 4}px`,
         width: '280px',
         padding: '6px 8px',
@@ -198,14 +202,24 @@ function serverRequest(op, payload = {}) {
     });
 }
 
-// Shows 'setup needed' on the button when settings are missing; returns false
-// so the caller can bail out of the operation.
+// Shows 'setup needed' on the button when settings are missing and opens the
+// extension's settings popup; returns false so the caller can bail out of the
+// operation.
 async function ensureConfigured(btn, original) {
     const status = await serverRequest('status');
     if (status.configured) return true;
-    console.warn('[pybricks-git] not configured — click the extension icon to sign in with GitHub');
     btn.textContent = 'setup needed';
     setTimeout(() => (btn.textContent = original), 3000);
+    try {
+        await serverRequest('openPopup');
+    } catch (err) {
+        // Chrome can refuse (e.g. another popup already open) — the button
+        // label is the fallback.
+        console.warn(
+            '[pybricks-git] not configured — click the extension icon to sign in with GitHub',
+            `(auto-open failed: ${err.message})`,
+        );
+    }
     return false;
 }
 

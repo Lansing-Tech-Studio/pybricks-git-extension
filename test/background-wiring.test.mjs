@@ -37,6 +37,33 @@ test('routes the four auth ops to the auth flow', async () => {
     assert.deepEqual(await call(handler, { op: 'authSignOut' }), { signedIn: false });
 });
 
+test('routes openPopup to the injected ui dep', async () => {
+    let opened = 0;
+    const handler = makeMessageHandler(fakeEngine, fakeAuth, {
+        openPopup: async () => {
+            opened++;
+        },
+    });
+    assert.deepEqual(await call(handler, { op: 'openPopup' }), { opened: true });
+    assert.equal(opened, 1);
+});
+
+test('openPopup failures come back as {error}', async () => {
+    const handler = makeMessageHandler(fakeEngine, fakeAuth, {
+        openPopup: async () => {
+            throw new Error('no active window');
+        },
+    });
+    assert.deepEqual(await call(handler, { op: 'openPopup' }), { error: 'no active window' });
+});
+
+test('openPopup without a ui dep still responds with {error}, not a hang', async () => {
+    // Node tests build handlers without ui; the op must fail cleanly there.
+    const handler = makeMessageHandler(fakeEngine, fakeAuth);
+    const res = await call(handler, { op: 'openPopup' });
+    assert.ok(res.error, 'expected an {error} response');
+});
+
 test('engine failures come back as {error} instead of hanging', async () => {
     const handler = makeMessageHandler({
         ...fakeEngine,

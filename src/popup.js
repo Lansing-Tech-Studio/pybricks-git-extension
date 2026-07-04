@@ -35,7 +35,7 @@ $('test').addEventListener('click', async () => {
     //   (a URL with no github.com/owner/repo shape)  → no match (stays failed)
     const match = s.repoUrl.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?(?:[/?#]|$)/);
     if (!match) {
-        $('status').textContent = 'Fork URL must look like https://github.com/owner/repo';
+        $('status').textContent = 'Repo/fork URL must look like https://github.com/owner/repo';
         return;
     }
     const headers = {
