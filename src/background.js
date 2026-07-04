@@ -241,7 +241,7 @@ async function commitOp(d, msg) {
 // that is how cancel() and a superseding start() kill it, with no in-memory
 // abort flags to lose when the service worker is killed.
 
-const GITHUB_CLIENT_ID = ''; // filled in after OAuth App registration (README)
+const GITHUB_CLIENT_ID = 'Ov23liqcQJLjt7WAtXm7';
 
 // The deviceCode the poll loop in this worker instance is servicing (null when
 // none). status() uses it to restart the loop after a service-worker kill.
