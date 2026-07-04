@@ -7,19 +7,33 @@
     input { width: 100%; box-sizing: border-box; padding: 4px 6px; }
     button { margin: 12px 8px 0 0; padding: 6px 12px; }
     #status { margin-top: 10px; white-space: pre-wrap; }
+    .code { font: 20px monospace; letter-spacing: 2px; }
 </style>
+<div id="signedOut" hidden>
+    <button id="signIn">Sign in with GitHub</button>
+    <div id="devicePrompt" hidden>
+        <p>Go to <a id="verifyLink" target="_blank" rel="noreferrer"></a> and enter:</p>
+        <p id="userCode" class="code"></p>
+        <p id="authState"></p>
+        <button id="cancelAuth">Cancel</button>
+    </div>
+</div>
+<div id="signedIn" hidden><span id="whoami"></span> <button id="signOut">Sign out</button></div>
 <label>Fork URL
     <input id="repoUrl" placeholder="https://github.com/your-team/robot-code" />
 </label>
 <label>Branch
     <input id="branch" placeholder="main" />
 </label>
-<label>GitHub token (fine-grained, this fork only, Contents read/write)
-    <input id="token" type="password" />
-</label>
 <label>Team name
     <input id="name" placeholder="Team Rocket" />
 </label>
+<details>
+    <summary>Advanced: paste a token instead</summary>
+    <label>GitHub token (fine-grained, this fork only, Contents read/write)
+        <input id="token" type="password" />
+    </label>
+</details>
 <button id="save">Save</button>
 <button id="test">Test connection</button>
 <div id="status"></div>

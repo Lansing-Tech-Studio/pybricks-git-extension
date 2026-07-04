@@ -15,11 +15,26 @@ const fakeEngine = {
     commit: async (msg) => ({ committed: true, head: 'abc1234', message: msg.message, pushed: true, preserved: [] }),
 };
 
+const fakeAuth = {
+    start: async () => ({ state: 'pending', userCode: 'X' }),
+    status: async () => ({ state: 'idle', signedIn: false, login: '' }),
+    cancel: async () => ({ state: 'idle' }),
+    signOut: async () => ({ signedIn: false }),
+};
+
 test('routes status, pull, and commit ops to the engine', async () => {
-    const handler = makeMessageHandler(fakeEngine);
+    const handler = makeMessageHandler(fakeEngine, fakeAuth);
     assert.equal((await call(handler, { op: 'status' })).configured, true);
     assert.equal((await call(handler, { op: 'pull' })).head, 'abc1234');
     assert.equal((await call(handler, { op: 'commit', files: [], message: 'm' })).message, 'm');
+});
+
+test('routes the four auth ops to the auth flow', async () => {
+    const handler = makeMessageHandler(fakeEngine, fakeAuth);
+    assert.deepEqual(await call(handler, { op: 'authStart' }), { state: 'pending', userCode: 'X' });
+    assert.deepEqual(await call(handler, { op: 'authStatus' }), { state: 'idle', signedIn: false, login: '' });
+    assert.deepEqual(await call(handler, { op: 'authCancel' }), { state: 'idle' });
+    assert.deepEqual(await call(handler, { op: 'authSignOut' }), { signedIn: false });
 });
 
 test('engine failures come back as {error} instead of hanging', async () => {
@@ -28,8 +43,18 @@ test('engine failures come back as {error} instead of hanging', async () => {
         pull: async () => {
             throw new Error('boom');
         },
-    });
+    }, fakeAuth);
     assert.deepEqual(await call(handler, { op: 'pull' }), { error: 'boom' });
+});
+
+test('auth failures come back as {error} instead of hanging', async () => {
+    const handler = makeMessageHandler(fakeEngine, {
+        ...fakeAuth,
+        start: async () => {
+            throw new Error('auth boom');
+        },
+    });
+    assert.deepEqual(await call(handler, { op: 'authStart' }), { error: 'auth boom' });
 });
 
 test('non-Error rejections still come back as a stringified {error}', async () => {
@@ -40,12 +65,12 @@ test('non-Error rejections still come back as a stringified {error}', async () =
         pull: async () => {
             throw 'plain string boom';
         },
-    });
+    }, fakeAuth);
     assert.deepEqual(await call(handler, { op: 'pull' }), { error: 'plain string boom' });
 });
 
 test('unknown ops come back as {error} synchronously', () => {
-    const handler = makeMessageHandler(fakeEngine);
+    const handler = makeMessageHandler(fakeEngine, fakeAuth);
     let got;
     const keepAlive = handler({ op: 'nope' }, {}, (res) => (got = res));
     assert.equal(keepAlive, false);
