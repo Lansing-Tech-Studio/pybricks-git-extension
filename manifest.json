@@ -3,6 +3,12 @@
   "name": "Pybricks Git",
   "version": "0.1.0",
   "description": "Version control for code.pybricks.com — commits straight to your team's GitHub fork",
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "permissions": ["storage"],
   "host_permissions": [
     "https://code.pybricks.com/*",
@@ -29,6 +35,12 @@
   ],
   "action": {
     "default_title": "Pybricks Git settings",
-    "default_popup": "src/popup.html"
+    "default_popup": "src/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   }
 }
