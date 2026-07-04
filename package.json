@@ -5,7 +5,8 @@
   "description": "Tooling-only manifest for the Pybricks Git extension. The extension itself is plain JS with no build step; this file exists solely so the JS unit tests have a place to declare their dev dependencies and a `test` script. Nothing here is shipped or required to load the unpacked extension.",
   "type": "module",
   "scripts": {
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "pack": "node scripts/pack.mjs"
   },
   "devDependencies": {
     "fake-indexeddb": "^6.0.0",

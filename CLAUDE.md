@@ -85,7 +85,7 @@ The same file also holds the OAuth Device Flow. `makeAuthFlow(deps)` follows the
 - **State machine in storage.** The whole flow lives under the `authFlow` key (`idle` → `pending` → `success` | `error`). `start` POSTs to GitHub's device-code endpoint (scope `public_repo`), stores the `pending` record, and kicks off a fire-and-forget poll loop. The loop re-reads `authFlow` each tick, so `cancel()` or a superseding `start()` kill it with no in-memory abort flag to lose on a worker kill; that recurring storage read also keeps the MV3 worker alive while the user is off authorizing.
 - **Survives worker kills.** A module-level `activePollDeviceCode` marks which flow this worker instance is polling. On every service-worker wake-up the wiring block calls `auth.status()`, which restarts the poll loop for a stranded `pending` record — so sign-in completes even if the popup was closed.
 - **On success** the token is written into `settings.token`; `settings.login` and `settings.email` (`<login>@users.noreply.github.com`) are derived from a best-effort `api.github.com/user` lookup (on failure the token is still saved with a team fallback identity).
-- **`GITHUB_CLIENT_ID`** at the top of `background.js` is a placeholder (empty string) until the maintainer registers the OAuth App (see README). While empty, `start` throws a clear error and the paste-a-PAT path still works.
+- **`GITHUB_CLIENT_ID`** at the top of `background.js` holds the registered OAuth App's Client ID (a public identifier, safe to commit — Device Flow uses no client secret). If it's ever emptied, `start` throws a clear error and the paste-a-PAT path still works.
 
 ## Commands
 
@@ -97,6 +97,11 @@ The same file also holds the OAuth Device Flow. `makeAuthFlow(deps)` follows the
 # Run the tests (needs the real `git` binary, ≥ 2.28 — see Tests).
 npm install   # once, pulls dev deps into gitignored node_modules
 npm test
+
+# Build the Chrome Web Store zip → dist/pybricks-git-v<version>.zip.
+# Packages manifest.json + src/ + vendor/ + icons/ only, with the
+# http://127.0.0.1/* E2E grant stripped from host_permissions.
+npm run pack
 ```
 
 There is no build step and nothing to run alongside the extension — the git work happens in the service worker.
@@ -108,6 +113,7 @@ There is no build step and nothing to run alongside the extension — the git wo
 - `test/git-http-server.mjs` is a hermetic git smart-HTTP server: it fronts `git http-backend` (CGI) with a Node `http` server bound to `127.0.0.1:0` (random port), serving throwaway bare repos. This is what the engine's fetch/push actually talk to, so the background suite doubles as integration coverage of the GitHub wire protocol.
 - `test/load-background.mjs` loads `src/background.js` *unmodified* — it reads the file and evaluates it in a `Function` scope that publishes `makeEngine` / `makeMessageHandler` / `makeAuthFlow` onto `globalThis`. The service-worker wiring block is skipped because `importScripts` is undefined in Node. Same rule as `inject.js`: **don't add ESM `export`s** to `background.js`; that would break it as a classic service worker.
 - `test/load-inject.mjs` does the equivalent for `src/inject.js` (appends a line publishing its internal functions), run against `fake-indexeddb`.
+- `test/pack.test.mjs` covers `scripts/pack.mjs` (the Web Store zip). It validates the output with the real **`unzip` binary** — a second external-tool requirement alongside git.
 - The `test` script globs `test/*.test.mjs` specifically so the `load-*.mjs` and other helpers aren't picked up as (empty) test files.
 - `vendor/` holds the pinned isomorphic-git / lightning-fs UMDs the service worker loads via `importScripts`; versions and exposed globals are documented in `vendor/README.md`. Update by re-downloading a pinned version and editing that table.
 - `package.json` exists **only** for the JS tests — it's tooling, not shipped. The extension still loads unpacked with no build step.
@@ -116,6 +122,6 @@ There is no build step and nothing to run alongside the extension — the git wo
 
 - `code.pybricks.com` sets **no CSP**, so script/style/eval restrictions are not a constraint. COEP/COOP are present (for `SharedArrayBuffer` / `crossOriginIsolated`, which Pyodide needs) but they don't bind extension behavior — the git traffic goes out of the service worker to `github.com`, not through the page context, so there is no cross-origin-isolation constraint to satisfy.
 - The extension is plain JS, no build step. If you add a bundler, output to `dist/` (gitignored) and update `manifest.json` paths.
-- `manifest.json` keeps `http://127.0.0.1/*` in `host_permissions` **on purpose** — the browser E2E driver (`test/e2e/`) points the extension at a local `git http-backend` server, and that grant is what lets the service worker fetch/push against it. Production traffic only ever goes to `github.com`; leave the localhost grant in place for the E2E path.
-- The token lives in `chrome.storage.local` (device-local, but readable by anyone using the Chrome profile). It gets there one of two ways: **Sign in with GitHub** (Device Flow OAuth, `public_repo` scope — the primary path) or a pasted fine-grained PAT under the popup's **Advanced** section (the fallback, required for private forks and when the OAuth App is unavailable). The OAuth path is gated on `GITHUB_CLIENT_ID` in `background.js` being filled in with a registered OAuth App's Client ID; while it's the empty placeholder, only the PAT path works.
+- `manifest.json` keeps `http://127.0.0.1/*` in `host_permissions` **on purpose** — the browser E2E driver (`test/e2e/`) points the extension at a local `git http-backend` server, and that grant is what lets the service worker fetch/push against it. Production traffic only ever goes to `github.com`; leave the localhost grant in place for the E2E path. The Web Store package is the exception: `npm run pack` strips this grant when building the zip, so the published extension never requests it — **always upload the `npm run pack` output, never a zip of the repo root.**
+- The token lives in `chrome.storage.local` (device-local, but readable by anyone using the Chrome profile). It gets there one of two ways: **Sign in with GitHub** (Device Flow OAuth, `public_repo` scope — the primary path) or a pasted fine-grained PAT under the popup's **Advanced** section (the fallback, required for private forks and when the OAuth App is unavailable). The OAuth path requires `GITHUB_CLIENT_ID` in `background.js` (a registered OAuth App's Client ID — filled in since 965e7b1); if it's ever emptied, only the PAT path works.
 - ChromeOS: **unmanaged** Chromebooks now work — the whole product is a sideloaded extension with no server or Crostini requirement, so "Load unpacked" (or a future Web Store install) is all that's needed. **Managed** Chromebooks are still the open risk: they block sideloaded extensions, so those need the Web Store listing plus an admin force-install policy.
