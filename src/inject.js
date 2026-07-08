@@ -29,6 +29,8 @@ async function handle(op, payload) {
             return await listFiles();
         case 'apply-files':
             return await applyFiles(payload);
+        case 'upsert-files':
+            return await upsertFiles(payload);
         default:
             throw new Error(`unknown op: ${op}`);
     }
@@ -84,13 +86,24 @@ function readAll(db, store) {
 
 // applyFiles({files: [{path, contents}]}) replaces the IDB-stored set with the
 // given files: adds new ones, updates changed ones (preserving viewState +
-// uuid on each metadata row), and deletes any IDB row whose path isn't in the
-// input. Returns a summary count.
+// uuid on each metadata row), and DELETES any IDB row whose path isn't in the
+// input. upsertFiles({files}) is its partial-write twin: it updates/inserts
+// ONLY the given paths and never deletes — used by the menu manager to save
+// menu_config.py without touching the rest of the project. Both return a
+// summary count.
 //
 // Caveat: Pybricks wraps Dexie with dexie-observable which hooks writes
 // through the Dexie API. Raw IndexedDB writes (what we do here) skip those
 // hooks, so the running React UI won't reflect changes until a reload.
 async function applyFiles({ files }) {
+    return await writeFiles(files, true);
+}
+
+async function upsertFiles({ files }) {
+    return await writeFiles(files, false);
+}
+
+async function writeFiles(files, deleteUnlisted) {
     const db = await openPybricksDb();
     try {
         // Pre-compute hashes outside the transaction (crypto.subtle is async
@@ -136,11 +149,13 @@ async function applyFiles({ files }) {
             }
         }
 
-        for (const m of existingMeta) {
-            if (!wantPaths.has(m.path)) {
-                metaStore.delete(m[metaStore.keyPath]);
-                contentsStore.delete(m.path);
-                deleted++;
+        if (deleteUnlisted) {
+            for (const m of existingMeta) {
+                if (!wantPaths.has(m.path)) {
+                    metaStore.delete(m[metaStore.keyPath]);
+                    contentsStore.delete(m.path);
+                    deleted++;
+                }
             }
         }
 

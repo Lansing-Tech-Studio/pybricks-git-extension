@@ -5,13 +5,13 @@
 // to mirror the Pybricks schema discovered in CLAUDE.md:
 //   metadata   keyPath "uuid"   { path, sha256, viewState, uuid }
 //   _contents  keyPath "path"   { path, contents }
-import test, { beforeEach } from 'node:test';
+import test, { beforeEach, describe } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { IDBFactory } from 'fake-indexeddb';
 import { loadInject } from './load-inject.mjs';
 
-const { applyFiles, sha256 } = loadInject();
+const { applyFiles, upsertFiles, sha256 } = loadInject();
 
 // Reference SHA-256 hex, computed independently of the code under test.
 const hexSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -211,6 +211,87 @@ test('handles add + change + delete + unchanged in one call, byte-for-byte', asy
     assert.equal(snap.byPath['edit.py'], 'after\n');
     assert.equal(snap.byPath['blocks.py'], block, 'block sentinel line must round-trip exactly');
     assert.equal(snap.byPath['remove.py'], undefined);
+});
+
+// --- upsertFiles: partial write that never deletes ---
+
+describe('upsertFiles', () => {
+    test('updates listed paths, leaves unlisted paths alone', async () => {
+        const db = await openPybricks();
+        const viewState = { cursor: [2, 7], scroll: 40 };
+        await seed(db, [
+            { path: 'a.py', contents: 'old a\n', uuid: 'uuid-a', viewState },
+            { path: 'b.py', contents: 'b body\n', uuid: 'uuid-b', viewState: { scroll: 3 } },
+        ]);
+
+        const summary = await upsertFiles({ files: [{ path: 'a.py', contents: 'new a\n' }] });
+        assert.deepEqual(summary, { added: 0, changed: 1, deleted: 0, unchanged: 0 });
+
+        const snap = await snapshot(db);
+        // a.py: contents updated, sha256 recomputed, uuid + viewState preserved.
+        assert.equal(snap.byPath['a.py'], 'new a\n');
+        const a = snap.metaByPath['a.py'];
+        assert.equal(a.uuid, 'uuid-a', 'uuid must be preserved on update');
+        assert.deepEqual(a.viewState, viewState, 'viewState must be preserved on update');
+        assert.equal(a.sha256, hexSha('new a\n'), 'sha256 must be recomputed');
+        // b.py: untouched and still present (never in the payload).
+        assert.equal(snap.metaCount, 2, 'unlisted path must survive');
+        assert.equal(snap.byPath['b.py'], 'b body\n', 'unlisted contents untouched');
+        const b = snap.metaByPath['b.py'];
+        assert.equal(b.uuid, 'uuid-b');
+        assert.deepEqual(b.viewState, { scroll: 3 });
+    });
+
+    test('inserts new paths with fresh uuid and null viewState', async () => {
+        const db = await openPybricks();
+        await seed(db, [{ path: 'a.py', contents: 'a body\n', uuid: 'uuid-a' }]);
+
+        const summary = await upsertFiles({
+            files: [{ path: 'menu_config.py', contents: 'MENU_ITEMS = []\n' }],
+        });
+        assert.deepEqual(summary, { added: 1, changed: 0, deleted: 0, unchanged: 0 });
+
+        const snap = await snapshot(db);
+        // Existing file untouched; new file inserted.
+        assert.equal(snap.metaCount, 2, 'existing path must survive an insert');
+        assert.equal(snap.byPath['a.py'], 'a body\n');
+        assert.equal(snap.byPath['menu_config.py'], 'MENU_ITEMS = []\n');
+        const m = snap.metaByPath['menu_config.py'];
+        assert.match(m.uuid, /[0-9a-f-]{36}/, 'new row gets a fresh uuid');
+        assert.notEqual(m.uuid, 'uuid-a');
+        assert.equal(m.viewState, null, 'new row gets a null viewState');
+        assert.equal(m.sha256, hexSha('MENU_ITEMS = []\n'));
+    });
+
+    test('unchanged contents counted, not rewritten', async () => {
+        const db = await openPybricks();
+        const viewState = { cursor: [0, 0] };
+        await seed(db, [{ path: 'a.py', contents: 'a body\n', uuid: 'uuid-a', viewState }]);
+
+        const summary = await upsertFiles({ files: [{ path: 'a.py', contents: 'a body\n' }] });
+        assert.deepEqual(summary, { added: 0, changed: 0, deleted: 0, unchanged: 1 });
+
+        const m = (await snapshot(db)).metaByPath['a.py'];
+        assert.equal(m.uuid, 'uuid-a', 'uuid untouched on a no-op');
+        assert.deepEqual(m.viewState, viewState, 'viewState untouched on a no-op');
+    });
+
+    test('applyFiles still deletes unlisted paths (regression)', async () => {
+        const db = await openPybricks();
+        await seed(db, [
+            { path: 'keep.py', contents: 'k\n', uuid: 'u-keep' },
+            { path: 'gone.py', contents: 'g\n', uuid: 'u-gone' },
+        ]);
+
+        const summary = await applyFiles({ files: [{ path: 'keep.py', contents: 'k\n' }] });
+        assert.deepEqual(summary, { added: 0, changed: 0, deleted: 1, unchanged: 1 });
+
+        const snap = await snapshot(db);
+        assert.equal(snap.metaCount, 1);
+        assert.equal(snap.contentCount, 1);
+        assert.equal(snap.byPath['gone.py'], undefined, 'applyFiles must still delete unlisted paths');
+        assert.equal(snap.metaByPath['gone.py'], undefined);
+    });
 });
 
 // --- openPybricksDb discovery ---
