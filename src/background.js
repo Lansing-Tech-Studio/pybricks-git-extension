@@ -188,20 +188,38 @@ async function commitOp(d, msg) {
     for (let attempt = 0; attempt < 3; attempt++) {
         const head = await fetchRemoteHead(d, s);
         if (!head && files.length === 0) {
-            return { committed: false, head: '', message: 'no changes', pushed: false, preserved: [] };
+            return { committed: false, head: '', message: 'no changes', pushed: false, preserved: [], protectedSkipped: [] };
         }
         const existing = await listAllFiles(d, head);
+        const protectedPaths = await readProtectedPaths(d, existing);
         const next = new Map(existing);
         const preserved = [];
+        const protectedSkipped = [];
         for (const path of existing.keys()) {
             if (!path.endsWith('.py')) continue;
             if (files.some((f) => f.path === path)) continue;
             // Delete only what a previous Pull showed the editor; never-pulled
             // files (fresh fork starter code) are preserved.
-            if (snapshot.has(path)) next.delete(path);
-            else preserved.push(path);
+            if (snapshot.has(path)) {
+                // Deleting a protected file is an edit too — the tree's copy stays.
+                if (protectedPaths.has(path)) protectedSkipped.push(path);
+                else next.delete(path);
+            } else preserved.push(path);
         }
         for (const f of files) {
+            if (protectedPaths.has(f.path)) {
+                // The tree's version always wins for protected paths. Report the
+                // path only when the editor actually diverged (changed contents, or
+                // a file that doesn't exist upstream and must not be created).
+                const entry = existing.get(f.path);
+                if (!entry) {
+                    protectedSkipped.push(f.path);
+                } else {
+                    const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
+                    if (new TextDecoder().decode(blob) !== f.contents) protectedSkipped.push(f.path);
+                }
+                continue;
+            }
             const oid = await d.git.writeBlob({
                 fs: d.fs,
                 gitdir: d.gitdir,
@@ -214,7 +232,7 @@ async function commitOp(d, msg) {
             ? (await d.git.readCommit({ fs: d.fs, gitdir: d.gitdir, oid: head })).commit.tree
             : null;
         if (newTree === oldTree) {
-            return { committed: false, head: head.slice(0, 7), message: 'no changes', pushed: false, preserved };
+            return { committed: false, head: head.slice(0, 7), message: 'no changes', pushed: false, preserved, protectedSkipped };
         }
         const message = (msg.message ?? '').trim() || `Update from Pybricks at ${new Date(d.now()).toISOString()}`;
         const author = {
@@ -245,7 +263,7 @@ async function commitOp(d, msg) {
                 remoteRef: `refs/heads/${s.branch}`,
                 onAuth: onAuth(s),
             });
-            return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved };
+            return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved, protectedSkipped };
         } catch (err) {
             if (err && err.code === 'PushRejectedError') {
                 lastErr = err; // someone else pushed between our fetch and push — rebuild on the new head
