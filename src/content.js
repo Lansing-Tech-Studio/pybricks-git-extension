@@ -137,6 +137,9 @@ async function commit(btn, message) {
                 result.preserved,
             );
         }
+        if (result.protectedSkipped && result.protectedSkipped.length) {
+            showProtectedNotice(result.protectedSkipped);
+        }
         const label = result.committed ? `✓ ${result.head}` : 'no changes';
         btn.textContent = label + (result.pushed ? ' ↑' : '');
         setTimeout(() => (btn.textContent = original), 3000);
@@ -147,6 +150,39 @@ async function commit(btn, message) {
     } finally {
         btn.disabled = false;
     }
+}
+
+// Kid-facing warning for commits that tried to change coach-managed files.
+// The engine kept the repo's version; the editor still shows the local edit
+// until the next Pull. Click or the timeout dismisses it.
+function showProtectedNotice(paths) {
+    document.querySelector('[data-pybricks-git-notice]')?.remove();
+    const one = paths.length === 1;
+    const box = document.createElement('div');
+    box.dataset.pybricksGitNotice = '1';
+    box.textContent =
+        `Your changes to ${paths.join(', ')} weren't saved — ` +
+        `${one ? 'that file is' : 'those files are'} managed by your coach's repo; ` +
+        `Pull to restore ${one ? 'it' : 'them'}.`;
+    box.title = 'Click to dismiss';
+    Object.assign(box.style, {
+        position: 'fixed',
+        top: '48px',
+        right: '12px',
+        maxWidth: '360px',
+        padding: '10px 14px',
+        background: '#5c3c00',
+        color: '#ffe2a8',
+        border: '1px solid #a97800',
+        borderRadius: '4px',
+        font: 'inherit',
+        fontSize: '13px',
+        zIndex: 10000,
+        cursor: 'pointer',
+    });
+    box.addEventListener('click', () => box.remove());
+    document.body.appendChild(box);
+    setTimeout(() => box.remove(), 15000);
 }
 
 async function pull(btn) {
