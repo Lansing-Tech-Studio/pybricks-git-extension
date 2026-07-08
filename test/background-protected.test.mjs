@@ -60,7 +60,7 @@ test('pull ignores a manifest with the wrong schemaVersion', async () => {
     }
 });
 
-test('pull ignores a manifest whose protected key is not an array, and drops non-string entries', async () => {
+test('pull ignores a manifest whose protected key is not an array', async () => {
     const { engine, server } = await setupEngine({
         '.pybricks-git.json': JSON.stringify({ schemaVersion: 1, protected: 'menu.py' }),
         'menu.py': 'MENU = 1\n',
