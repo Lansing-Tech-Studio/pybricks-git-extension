@@ -34,6 +34,14 @@ const menuPanel = makeMenuPanel({
     reload: () => location.reload(),
 });
 
+const fileListWatcher = makeFileListWatcher({
+    pageRequest,
+    storageGet: (key) =>
+        new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
+    addSlot: (module, fn, blocks) => menuPanel.addSlot(module, fn, blocks),
+});
+fileListWatcher.start().catch((err) => console.warn('[pybricks-git] file-list watcher failed:', err));
+
 mountButton().catch((err) => console.warn('[pybricks-git] mount failed:', err));
 
 async function mountButton() {

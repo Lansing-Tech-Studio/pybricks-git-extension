@@ -11,10 +11,12 @@ function makeMenuPanel(deps) {
     let pos = { left: 80, top: 80 };
     // state: { menuConfigPath, items, programs, protectedPaths, banner, dirty }
     let state = null;
-    // Synchronous re-entrancy guard: set BEFORE the first await so two
-    // interleaved open() calls can't both build a panel (the `if (panel)` check
-    // alone races across the awaits below).
-    let opening = false;
+    // In-flight open() promise (null when idle). A boolean guard let a second
+    // caller return early — before `state` was assigned — so addSlot()'s
+    // `await open()` could then touch a null `state` and throw. Concurrent
+    // callers now await THIS promise, so `state`/`panel` are guaranteed set by
+    // the time open() resolves for any of them.
+    let opening = null;
 
     async function toggle() {
         if (panel) close();
@@ -25,23 +27,26 @@ function makeMenuPanel(deps) {
         return !!panel;
     }
 
-    async function open() {
-        if (panel || opening) return;
-        opening = true;
-        try {
-            const saved = await storageGet('menuPanel');
-            if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
-                pos = { left: saved.left, top: saved.top };
+    function open() {
+        if (panel) return Promise.resolve();
+        if (opening) return opening;
+        opening = (async () => {
+            try {
+                const saved = await storageGet('menuPanel');
+                if (saved && typeof saved.left === 'number' && typeof saved.top === 'number') {
+                    pos = { left: saved.left, top: saved.top };
+                }
+                state = await loadState();
+                panel = buildShell();
+                document.body.appendChild(panel);
+                clampIntoViewport();
+                void persist(true);
+                render();
+            } finally {
+                opening = null;
             }
-            state = await loadState();
-            panel = buildShell();
-            document.body.appendChild(panel);
-            clampIntoViewport();
-            void persist(true);
-            render();
-        } finally {
-            opening = false;
-        }
+        })();
+        return opening;
     }
 
     function close() {
