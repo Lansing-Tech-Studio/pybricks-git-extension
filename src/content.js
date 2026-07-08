@@ -26,6 +26,14 @@ function pageRequest(op, payload) {
     });
 }
 
+const menuPanel = makeMenuPanel({
+    pageRequest,
+    storageGet: (key) =>
+        new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
+    storageSet: (obj) => new Promise((resolve) => chrome.storage.local.set(obj, () => resolve())),
+    reload: () => location.reload(),
+});
+
 mountButton().catch((err) => console.warn('[pybricks-git] mount failed:', err));
 
 async function mountButton() {
@@ -42,6 +50,21 @@ async function mountButton() {
 
     toolbar.appendChild(commitBtn);
     toolbar.appendChild(pullBtn);
+
+    const menuBtn = makeBtn('Menu', 'Pybricks Git: edit the hub menu');
+    menuBtn.dataset.pybricksGitMenuBtn = '1';
+    menuBtn.addEventListener('click', () => {
+        menuPanel.toggle().catch((err) => console.error('[pybricks-git] panel failed:', err));
+    });
+    toolbar.appendChild(menuBtn);
+
+    // Reopen the panel after the reload that Save/Pull triggers.
+    const saved = await new Promise((resolve) =>
+        chrome.storage.local.get('menuPanel', (v) => resolve(v.menuPanel)),
+    );
+    if (saved && saved.open) {
+        menuPanel.open().catch((err) => console.warn('[pybricks-git] panel reopen failed:', err));
+    }
 }
 
 function makeBtn(label, title) {
