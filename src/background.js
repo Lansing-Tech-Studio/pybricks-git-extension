@@ -98,13 +98,37 @@ async function listAllFiles(d, commitOid) {
     return out;
 }
 
+// Reads the repo's protection manifest (.pybricks-git.json at the root) out
+// of an already-listed tree. Anything short of a well-formed schemaVersion-1
+// manifest with an array `protected` means "no protection" — forks that
+// predate the manifest (or carry a broken one) must keep working, so this
+// never throws.
+const MANIFEST_PATH = '.pybricks-git.json';
+
+async function readProtectedPaths(d, fileMap) {
+    const entry = fileMap.get(MANIFEST_PATH);
+    if (!entry) return new Set();
+    try {
+        const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
+        const manifest = JSON.parse(new TextDecoder().decode(blob));
+        if (!manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.protected)) {
+            return new Set();
+        }
+        return new Set(manifest.protected.filter((p) => typeof p === 'string'));
+    } catch {
+        return new Set();
+    }
+}
+
 async function pullOp(d) {
     const s = await getSettings(d);
     requireConfigured(s);
     const head = await fetchRemoteHead(d, s);
     const files = [];
+    let protectedPaths = new Set();
     if (head) {
         const all = await listAllFiles(d, head);
+        protectedPaths = await readProtectedPaths(d, all);
         for (const [path, entry] of all) {
             if (!path.endsWith('.py')) continue;
             const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
@@ -121,6 +145,7 @@ async function pullOp(d) {
     return {
         head: head ? head.slice(0, 7) : '',
         files,
+        protected: [...protectedPaths],
         pullWarning: head ? '' : 'remote repository has no commits yet',
     };
 }
