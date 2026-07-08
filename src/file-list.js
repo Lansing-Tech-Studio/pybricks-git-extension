@@ -50,11 +50,21 @@ function makeFileListWatcher(deps) {
     // path from the editor, so a pybricks-code DOM change degrades to "still
     // works" instead of "silently gone". Returns [{row, path, labelEl}] where
     // `path` equals the IndexedDB path and `row` is the treeitem boundary.
+    //
+    // GATE: the Explorer panel unmounts whenever it's closed (file-list-dom.md
+    // §0), which is the default state and the state after every post-Pull
+    // reload. With no panel there are NO file rows anywhere — bail before the
+    // fallback, or every settled editor mutation (~250ms while typing) would
+    // trigger a list-files round-trip plus a text-walk that can match file
+    // names OUTSIDE the tree (e.g. the active file's editor tab) and badge
+    // editor chrome.
     async function findFileRows() {
         const rows = [];
-        const seen = new Set();
 
+        const panel = document.querySelector('div.pb-activities-tabview');
         const tree = document.querySelector('[role="tree"][aria-label="Files"]');
+        if (!panel && !tree) return rows;
+
         if (tree) {
             for (const li of tree.querySelectorAll('li[role="treeitem"]')) {
                 const labelEl = li.querySelector('span.bp5-tree-node-label');
@@ -63,13 +73,15 @@ function makeFileListWatcher(deps) {
                 const path = labelEl && labelEl.textContent;
                 if (!path) continue;
                 rows.push({ row: li, path, labelEl });
-                seen.add(path);
             }
         }
         if (rows.length) return rows;
 
-        // Fallback — structure changed (Blueprint bump, class rename). Anchor on
-        // the file names the extension already controls via list-files.
+        // Fallback — the panel/tree is mounted but the expected row structure
+        // yielded nothing (Blueprint bump, class rename). Anchor on the file
+        // names the extension already controls via list-files, confined to the
+        // panel subtree so editor chrome can never match.
+        const scope = tree || panel;
         let listing;
         try {
             listing = await pageRequest('list-files');
@@ -77,22 +89,21 @@ function makeFileListWatcher(deps) {
             return rows;
         }
         for (const { path } of listing.contents) {
-            if (seen.has(path)) continue;
-            const match = findElementByExactText(path);
+            const match = findElementByExactText(scope, path);
             if (!match) continue;
             const row = match.closest('[role="treeitem"], li') || match;
             rows.push({ row, path, labelEl: match });
-            seen.add(path);
         }
         return rows;
     }
 
-    // Innermost element whose exact trimmed textContent equals `text`. Document
-    // order visits parents before children, so overwriting keeps the deepest
-    // match in a parent→child chain (file names are unique, so at most one row).
-    function findElementByExactText(text) {
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
-        let match = null;
+    // Innermost element under `root` whose exact trimmed textContent equals
+    // `text`. Document order visits parents before children, so overwriting
+    // keeps the deepest match in a parent→child chain (file names are unique,
+    // so at most one row).
+    function findElementByExactText(root, text) {
+        const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+        let match = root.textContent.trim() === text ? root : null;
         for (let node = walker.nextNode(); node; node = walker.nextNode()) {
             if (node.textContent.trim() === text) match = node;
         }
@@ -106,6 +117,7 @@ function makeFileListWatcher(deps) {
         });
         let pressTimer = null;
         row.addEventListener('touchstart', (ev) => {
+            clearTimeout(pressTimer);
             const t = ev.touches[0];
             pressTimer = setTimeout(() => void showMenu(path, t.clientX, t.clientY), 600);
         });
@@ -141,6 +153,21 @@ function makeFileListWatcher(deps) {
             minWidth: '180px',
         });
 
+        // Single dismissal path for ALL exits (item click, Escape, outside
+        // pointerdown) so the capture-phase window listeners always come off
+        // with the menu.
+        const dismiss = () => {
+            menu.remove();
+            window.removeEventListener('pointerdown', onPointerDown, true);
+            window.removeEventListener('keydown', onKey, true);
+        };
+        const onPointerDown = (ev) => {
+            if (!menu.contains(ev.target)) dismiss();
+        };
+        const onKey = (ev) => {
+            if (ev.key === 'Escape') dismiss();
+        };
+
         const entries = [{ label: `Add ${info.module} to menu`, fn: null }];
         for (const method of info.methods) {
             entries.push({ label: `Add ${info.module}.${method}() to menu`, fn: method });
@@ -156,27 +183,13 @@ function makeFileListWatcher(deps) {
             btn.addEventListener('mouseenter', () => (btn.style.background = '#3d3d40'));
             btn.addEventListener('mouseleave', () => (btn.style.background = 'none'));
             btn.addEventListener('click', () => {
-                menu.remove();
+                dismiss();
                 void addSlot(info.module, entry.fn, entry.fn ? info.isBlocks : false);
             });
             menu.appendChild(btn);
         }
 
-        const dismiss = (ev) => {
-            if (!menu.contains(ev.target)) {
-                menu.remove();
-                window.removeEventListener('pointerdown', dismiss, true);
-                window.removeEventListener('keydown', onKey, true);
-            }
-        };
-        const onKey = (ev) => {
-            if (ev.key === 'Escape') {
-                menu.remove();
-                window.removeEventListener('pointerdown', dismiss, true);
-                window.removeEventListener('keydown', onKey, true);
-            }
-        };
-        window.addEventListener('pointerdown', dismiss, true);
+        window.addEventListener('pointerdown', onPointerDown, true);
         window.addEventListener('keydown', onKey, true);
 
         document.body.appendChild(menu);
