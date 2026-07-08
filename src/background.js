@@ -105,19 +105,32 @@ async function listAllFiles(d, commitOid) {
 // never throws.
 const MANIFEST_PATH = '.pybricks-git.json';
 
-async function readProtectedPaths(d, fileMap) {
+// Reads the repo manifest (.pybricks-git.json at the root) out of an
+// already-listed tree: the protected-path set plus the menu-config file name
+// the phase-3 panel edits. Anything short of a well-formed schemaVersion-1
+// manifest means "no protection" — this never throws.
+async function readManifestInfo(d, fileMap) {
+    const none = { protected: new Set(), menuConfig: null };
     const entry = fileMap.get(MANIFEST_PATH);
-    if (!entry) return new Set();
+    if (!entry) return none;
     try {
         const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
         const manifest = JSON.parse(new TextDecoder().decode(blob));
-        if (!manifest || manifest.schemaVersion !== 1 || !Array.isArray(manifest.protected)) {
-            return new Set();
-        }
-        return new Set(manifest.protected.filter((p) => typeof p === 'string'));
+        if (!manifest || manifest.schemaVersion !== 1) return none;
+        return {
+            protected: new Set(
+                (Array.isArray(manifest.protected) ? manifest.protected : [])
+                    .filter((p) => typeof p === 'string'),
+            ),
+            menuConfig: typeof manifest.menuConfig === 'string' ? manifest.menuConfig : null,
+        };
     } catch {
-        return new Set();
+        return none;
     }
+}
+
+async function readProtectedPaths(d, fileMap) {
+    return (await readManifestInfo(d, fileMap)).protected;
 }
 
 async function pullOp(d) {
@@ -125,10 +138,10 @@ async function pullOp(d) {
     requireConfigured(s);
     const head = await fetchRemoteHead(d, s);
     const files = [];
-    let protectedPaths = new Set();
+    let manifestInfo = { protected: new Set(), menuConfig: null };
     if (head) {
         const all = await listAllFiles(d, head);
-        protectedPaths = await readProtectedPaths(d, all);
+        manifestInfo = await readManifestInfo(d, all);
         for (const [path, entry] of all) {
             if (!path.endsWith('.py')) continue;
             const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
@@ -138,14 +151,21 @@ async function pullOp(d) {
     // Only update the snapshot when the editor was actually shown a file set.
     // An empty/missing-branch pull applies nothing (content.js skips it), so
     // clobbering lastPullPaths to [] here would make the next Commit treat every
-    // previously-tracked path as known and delete it.
+    // previously-tracked path as known and delete it. lastPullManifest follows
+    // the same guard so an empty-branch pull leaves the last real snapshot intact.
     if (head) {
-        await d.storage.set({ lastPullPaths: files.map((f) => f.path) });
+        await d.storage.set({
+            lastPullPaths: files.map((f) => f.path),
+            lastPullManifest: {
+                protected: [...manifestInfo.protected],
+                menuConfig: manifestInfo.menuConfig,
+            },
+        });
     }
     return {
         head: head ? head.slice(0, 7) : '',
         files,
-        protected: [...protectedPaths],
+        protected: [...manifestInfo.protected],
         pullWarning: head ? '' : 'remote repository has no commits yet',
     };
 }

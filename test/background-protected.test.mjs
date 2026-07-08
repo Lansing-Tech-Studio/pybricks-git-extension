@@ -253,3 +253,78 @@ test('commit of zero files against an empty repo returns protectedSkipped: []', 
         await server.close();
     }
 });
+
+test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullPaths', async () => {
+    const { engine, storage, server } = await setupEngine({
+        '.pybricks-git.json': JSON.stringify({
+            schemaVersion: 1,
+            menuConfig: 'menu_config.py',
+            protected: ['menu.py'],
+        }),
+        'menu.py': 'MENU = 1\n',
+        'a.py': 'x = 1\n',
+    });
+    try {
+        await engine.pull();
+        const stored = await storage.get('lastPullManifest');
+        assert.deepEqual(stored, { protected: ['menu.py'], menuConfig: 'menu_config.py' });
+        assert.deepEqual((await storage.get('lastPullPaths')).sort(), ['a.py', 'menu.py']);
+    } finally {
+        await server.close();
+    }
+});
+
+test('pull with no manifest stores empty lastPullManifest', async () => {
+    const { engine, storage, server } = await setupEngine({ 'main.py': 'x = 1\n' });
+    try {
+        await engine.pull();
+        const stored = await storage.get('lastPullManifest');
+        assert.deepEqual(stored, { protected: [], menuConfig: null });
+    } finally {
+        await server.close();
+    }
+});
+
+test('empty-branch pull leaves lastPullManifest untouched', async () => {
+    const { engine, storage, server } = await setupEngine();
+    try {
+        const sentinel = { protected: ['keep.py'], menuConfig: 'menu_config.py' };
+        await storage.set({ lastPullManifest: sentinel });
+        const result = await engine.pull();
+        assert.notEqual(result.pullWarning, ''); // confirm this was an empty fork
+        assert.deepEqual(await storage.get('lastPullManifest'), sentinel);
+    } finally {
+        await server.close();
+    }
+});
+
+test('one commit mixing a protected deletion and a divergent protected edit reports both', async () => {
+    // (deferred from phase 2) menu.py + main.py are both protected. One commit
+    // omits menu.py (deletion attempt) and edits main.py (divergent edit).
+    const { engine, bare, server } = await setupEngine({
+        '.pybricks-git.json': MANIFEST,
+        'menu.py': 'MENU = 1\n',
+        'main.py': 'MAIN = 1\n',
+        'team.py': 'x = 1\n',
+    });
+    try {
+        await engine.pull(); // both protected paths enter the lastPullPaths snapshot
+        const result = await engine.commit({
+            files: [
+                { path: 'main.py', contents: 'MAIN = 999\n' }, // divergent protected edit
+                { path: 'team.py', contents: 'x = 2\n' }, // menu.py omitted → deletion attempt
+            ],
+            message: 'delete menu and edit main',
+        });
+        assert.equal(result.committed, true);
+        assert.deepEqual(
+            new Set(result.protectedSkipped),
+            new Set(['menu.py', 'main.py']),
+        );
+        assert.equal(bareFile(bare, 'menu.py'), 'MENU = 1\n'); // deletion skipped
+        assert.equal(bareFile(bare, 'main.py'), 'MAIN = 1\n'); // edit skipped
+        assert.equal(bareFile(bare, 'team.py'), 'x = 2\n'); // team change landed
+    } finally {
+        await server.close();
+    }
+});
