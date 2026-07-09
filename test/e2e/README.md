@@ -211,3 +211,63 @@ Recorded from a real passing run (Chromium 1228):
 
 `menu-panel.png` (committed alongside this README) is the screenshot after the
 push, with the menu panel reopened over the editor.
+
+# `drive-splice.mjs` — phase-4 setup-splice round-trip
+
+The third self-contained driver, on the same mechanics as `drive.mjs` (copied
+and annotated). It proves the **new-program-from-team-setup** and
+**Update-robot-setup** flows work end to end against the real UI, IndexedDB
+bridge, and service worker — including the **snapshot-first safety rail** and the
+**editor round-trip** the spec calls out as acceptance.
+
+## How to run
+
+```bash
+node test/e2e/drive-splice.mjs
+```
+
+Exit code `0` = PASS, non-zero = FAIL. On success it writes `splice-panel.png`
+(committed alongside this README); on failure it writes `splice-failure.png`.
+
+## What it covers
+
+It seeds the bare repo with the **phase-4 template shape** — a `.pybricks-git.json`
+manifest (`{schemaVersion:1, menuConfig:"menu_config.py", teamSetup:"robot_setup.py",
+protected:["menu.py"]}`), a protected `menu.py`, `menu_config.py`, the team setup
+`robot_setup.py` (= `test/fixtures/setup-only.py`), and three block programs
+derived from it by JSON surgery on the setup chain: `prog_match.py` (chain
+identical), `prog_differs.py` (one motor port changed → splices cleanly), and
+`prog_renamed.py` (a device renamed → `spliceSetup` skips). Then:
+
+1. Writes settings via the SW, dismisses the Welcome Tour, **Pull**s (`↓ +6 ~0 -0`),
+   and asserts `lastPullManifest` carries `teamSetup` + `protected`.
+2. Opens the Menu panel and asserts the **setup-differs nudge**:
+   `[data-pybricks-git-setup-differs]` marks `prog_differs`/`prog_renamed`, not
+   the matching `prog_match`; the `[data-pybricks-git-update-setup]` and
+   `[data-pybricks-git-new-program]` buttons are present.
+3. **New program:** creates `my_new_one` via `[data-pybricks-git-new-program]`;
+   after the reload asserts `my_new_one.py` exists with `setupSignature` equal to
+   `robot_setup.py`'s and a `blockGlobalStart` block. (Creating a local file also
+   diverges the editor from the remote, so the next step's snapshot lands a real
+   commit.)
+4. **Update robot setup:** clicks the button and, after the reload, asserts the
+   **snapshot-first rail** harness-side — the remote gained a `Before robot setup
+   update` commit whose tree holds the **PRE-splice** `prog_differs.py` (the
+   spliced version lives only in editor IDB until the manual Commit), with
+   `prog_renamed.py`/`menu.py` byte-identical. Browser-side it asserts the
+   `[data-pybricks-git-splice-report]` block (updated: `prog_differs`; skipped:
+   `prog_renamed` with the kid-facing reason) and that the editor `prog_differs.py`
+   signature now matches the team setup while `prog_renamed.py` is untouched.
+5. **Editor round-trip (the spec's acceptance):** opens the spliced
+   `prog_differs.py` in the editor, waits out the 4–7s regen debounce documented
+   in `blocks-format.md`, and asserts no error toast, line-1 JSON still parses,
+   and the setup signature is **unchanged** (the Python may regenerate; the
+   semantic invariant holds). If the Explorer row doesn't render headless this
+   logs a **SKIP** rather than failing.
+6. **Commit**s via the toolbar → asserts the label reaches `✓ <sha> ↑` and the
+   pushed `prog_differs.py` now carries the spliced (team-matching) setup, with
+   `menu.py` still byte-identical (protection held end to end).
+7. Asserts zero **extension** exceptions across the page and the service worker.
+
+`splice-panel.png` (committed alongside this README) is the screenshot after the
+push, with the splice report shown in the reopened panel.
