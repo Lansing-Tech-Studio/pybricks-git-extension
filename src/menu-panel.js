@@ -164,9 +164,10 @@ function makeMenuPanel(deps) {
     // --- state loading ---------------------------------------------------
 
     async function loadState() {
-        const [listing, manifest] = await Promise.all([
+        const [listing, manifest, spliceReport] = await Promise.all([
             pageRequest('list-files'),
             storageGet('lastPullManifest'),
+            storageGet('spliceReport'),
         ]);
         const menuConfigPath = (manifest && manifest.menuConfig) || 'menu_config.py';
         // No default for teamSetup/setupTemplate: a null teamSetup hides the
@@ -192,23 +193,48 @@ function makeMenuPanel(deps) {
                 items = parsed.items;
             }
         }
-        const programs = listing.contents
-            .filter((c) => c.path !== menuConfigPath && !protectedPaths.has(c.path))
-            .map((c) => analyzeProgram(c.path, c.contents))
-            .filter((p) => p.module)
-            .sort((a, b) => a.module.localeCompare(b.module));
-        // The team-setup file the new-program seed is grafted from. The manifest
-        // can name it even when it's not in the editor yet (kid hasn't Pulled);
-        // teamSetupRow null in that case → createProgram tells them to Pull.
+        // The team-setup file the new-program seed is grafted from and the
+        // splice source. The manifest can name it even when it's not in the
+        // editor yet (kid hasn't Pulled); teamSetupRow null in that case →
+        // createProgram/updateSetup tell them to Pull.
         const teamSetupRow = teamSetup
             ? listing.contents.find((c) => c.path === teamSetup) || null
             : null;
+        // The team setup's own signature, computed once. Null (or error) → no
+        // program can be flagged as "differs" (nothing to compare against).
+        const teamSig = teamSetupRow ? setupSignature(teamSetupRow.contents) : null;
+        // Keep path+contents on each program (analyzeProgram drops them) so the
+        // nudge and the splice have the source to work with.
+        const programs = listing.contents
+            .filter((c) => c.path !== menuConfigPath && !protectedPaths.has(c.path))
+            .map((c) => ({ ...analyzeProgram(c.path, c.contents), path: c.path, contents: c.contents }))
+            .filter((p) => p.module)
+            .sort((a, b) => a.module.localeCompare(b.module));
+        // Splice eligibility + setup-differs nudge. Eligible = a block program
+        // that is NOT the team setup or setup template itself (menuConfig and
+        // protected paths are already filtered out above). A program "differs"
+        // only when BOTH its own and the team setup's signatures parse AND they
+        // disagree — an unreadable signature is not "different", so those files
+        // are never marked and never spliced (spliceSetup skips them too).
+        for (const p of programs) {
+            p.spliceEligible = p.isBlocks && p.path !== teamSetup && p.path !== setupTemplate;
+            p.setupDiffers = false;
+            if (p.spliceEligible && teamSig && !teamSig.error) {
+                const sig = setupSignature(p.contents);
+                if (!sig.error) p.setupDiffers = sig.signature !== teamSig.signature;
+            }
+        }
         // Name-collision must consider EVERY editor path, not just menu-eligible
         // programs (a new .py can't shadow a protected/config/non-program file).
         const allPaths = filePaths;
         return {
             menuConfigPath, items, programs, protectedPaths, banner, dirty: false,
             teamSetup, setupTemplate, teamSetupRow, allPaths,
+            // Full editor file set — the snapshot commit before a splice sends
+            // exactly this (path+contents), and it is the source of truth for
+            // what "Before robot setup update" preserves.
+            allFiles: listing.contents.map((c) => ({ path: c.path, contents: c.contents })),
+            spliceReport: spliceReport || null,
         };
     }
 
@@ -219,6 +245,7 @@ function makeMenuPanel(deps) {
         const body = panel.querySelector('[data-pybricks-git-panel-body]');
         body.textContent = '';
 
+        if (state.spliceReport) body.appendChild(spliceReportBlock(state.spliceReport));
         if (state.banner) body.appendChild(noteEl(state.banner));
 
         body.appendChild(sectionTitle('Menu slots (drag to reorder)'));
@@ -256,6 +283,17 @@ function makeMenuPanel(deps) {
             );
             newBtn.dataset.pybricksGitNewProgram = '1';
             footer.appendChild(newBtn);
+        }
+        // Offer the propagate flow only when there's a team setup to splice from
+        // AND at least one program actually differs from it.
+        if (state.teamSetupRow && state.programs.some((p) => p.setupDiffers)) {
+            const updateBtn = miniIconButton(
+                'Update robot setup',
+                'Copy the team robot setup into every block program that differs (a safety snapshot is committed first)',
+                () => void updateSetup(updateBtn),
+            );
+            updateBtn.dataset.pybricksGitUpdateSetup = '1';
+            footer.appendChild(updateBtn);
         }
         const status = document.createElement('span');
         status.dataset.pybricksGitStatus = '1';
@@ -338,6 +376,111 @@ function makeMenuPanel(deps) {
         } catch (err) {
             setStatus(`Couldn't create it: ${err.message}`);
         }
+    }
+
+    // --- update robot setup (propagate) ----------------------------------
+
+    // Splice the team's robot setup into every block program that differs.
+    // NON-NEGOTIABLE SAFETY RAIL: a snapshot commit ("Before robot setup
+    // update") MUST land before any editor file is mutated. If the snapshot
+    // throws, nothing is spliced and nothing is written — the kid can always
+    // get back to exactly what they had.
+    async function updateSetup(btn) {
+        if (!state.teamSetupRow) {
+            setStatus(`Pull first — your repo's ${state.teamSetup} isn't in the editor yet.`);
+            return;
+        }
+        if (btn) btn.disabled = true;
+        setStatus('Saving a safety snapshot…');
+        // Snapshot the ENTIRE editor tree as it stands now. A "no changes"
+        // result (committed:false) means the tree already matches the remote —
+        // still safe to proceed. Only a THROW aborts.
+        const files = state.allFiles.map(({ path, contents }) => ({ path, contents }));
+        try {
+            await serverRequest('commit', { files, message: 'Before robot setup update' });
+        } catch (err) {
+            setStatus(`Couldn't save the safety snapshot — nothing was changed. (${err.message})`);
+            if (btn) btn.disabled = false;
+            return;
+        }
+        // Snapshot is safe on the remote — now splice. Each eligible target is
+        // a block program that isn't the team setup / setup template itself
+        // (menuConfig + protected are already out of state.programs).
+        const updated = [];
+        const skipped = [];
+        for (const p of state.programs) {
+            if (!p.spliceEligible) continue;
+            const res = spliceSetup(p.contents, state.teamSetupRow.contents);
+            if (res.error) { skipped.push({ path: p.path, reason: res.error }); continue; }
+            if (res.changed) updated.push({ path: p.path, contents: res.contents });
+        }
+        if (updated.length) {
+            try {
+                await pageRequest('upsert-files', {
+                    files: updated.map((u) => ({ path: u.path, contents: u.contents })),
+                });
+            } catch (err) {
+                setStatus(`Saved the snapshot, but couldn't write the updates: ${err.message}`);
+                if (btn) btn.disabled = false;
+                return;
+            }
+        }
+        if (!updated.length && !skipped.length) {
+            setStatus('All programs already match.');
+            if (btn) btn.disabled = false;
+            return;
+        }
+        const report = { when: new Date().toISOString(), updated: updated.map((u) => u.path), skipped };
+        await storageSet({ spliceReport: report });
+        if (updated.length) {
+            // Editor IDB changed under dexie-observable's back — reload so the
+            // app rebuilds from our write (same rule as Save/new-program). The
+            // report renders after the reload from the persisted spliceReport.
+            await persist(true);
+            setStatus(`Updated ${updated.length} program(s)… reloading`);
+            setTimeout(() => reload(), 800);
+        } else {
+            // Only skips — nothing was written, so no reload. Show the report
+            // inline so the kid sees why each program was left alone.
+            state.spliceReport = report;
+            render();
+            setStatus(`Couldn't update ${skipped.length} program(s) — see the report above.`);
+        }
+    }
+
+    // Dismissable summary of the last splice, rendered at the top of the body
+    // on open (from the persisted spliceReport) and on the inline skip-only
+    // path. Dismiss clears the storage key and re-renders.
+    function spliceReportBlock(report) {
+        const box = document.createElement('div');
+        box.dataset.pybricksGitSpliceReport = '1';
+        Object.assign(box.style, {
+            border: '1px solid #4a4a4a', background: '#2a2a2d', borderRadius: '4px',
+            padding: '8px 10px', margin: '0 0 10px', fontSize: '12px',
+        });
+        if (report.updated && report.updated.length) {
+            const line = document.createElement('div');
+            line.textContent = `Robot setup updated in: ${report.updated.join(', ')}`;
+            line.style.color = '#9ccc65';
+            box.appendChild(line);
+        }
+        for (const s of report.skipped || []) {
+            const line = document.createElement('div');
+            line.textContent = `Skipped ${s.path} — ${s.reason}`;
+            line.style.color = '#e2b93b';
+            box.appendChild(line);
+        }
+        const dismiss = miniIconButton('Dismiss', 'Hide this report', () => void dismissSpliceReport());
+        dismiss.dataset.pybricksGitSpliceReportDismiss = '1';
+        dismiss.style.marginTop = '6px';
+        box.appendChild(dismiss);
+        return box;
+    }
+
+    async function dismissSpliceReport() {
+        await storageSet({ spliceReport: null });
+        state.spliceReport = null;
+        render();
     }
 
     // Section heading inside the panel body.
@@ -503,6 +646,17 @@ function makeMenuPanel(deps) {
         name.title = p.isBlocks ? 'Block program' : 'Python program';
         name.style.flex = '1';
         row.appendChild(name);
+
+        // Nudge: this block program's robot setup no longer matches the team's.
+        // Only shown when both signatures parse and disagree (see loadState).
+        if (p.setupDiffers) {
+            const warn = document.createElement('span');
+            warn.dataset.pybricksGitSetupDiffers = '1';
+            warn.textContent = '⚠ setup differs';
+            warn.title = 'This program’s robot setup doesn’t match robot_setup.py — use Update robot setup';
+            Object.assign(warn.style, { color: '#e2b93b', fontSize: '12px', whiteSpace: 'nowrap' });
+            row.appendChild(warn);
+        }
 
         const addWhole = miniIconButton('+ program', `Run all of ${p.module}`, () =>
             void addSlot(p.module, null, false),
