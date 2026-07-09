@@ -16,8 +16,8 @@ Everything runs in the browser; the only external party is `github.com`:
 [code.pybricks.com page]
   ├─ inject.js (MAIN world)      ─── opens Pybricks' IndexedDB directly
   │   ↕ window.postMessage (pybricks-git:request / :response, id-correlated)
-  ├─ ISOLATED world (4 scripts, loaded in this order):
-  │     menu-config.js → menu-panel.js → file-list.js → content.js
+  ├─ ISOLATED world (5 scripts, loaded in this order):
+  │     menu-config.js → blocksplice.js → menu-panel.js → file-list.js → content.js
   │   ─── inject toolbar/panel/file-list UI; bridge the page
   │   ↕ chrome.runtime.sendMessage    to the service worker
   └─ background.js (service worker) ─ the git engine (vendored isomorphic-git)
@@ -25,7 +25,7 @@ Everything runs in the browser; the only external party is `github.com`:
      [github.com — the team's fork]
 ```
 
-**The ISOLATED world is four classic scripts**, listed in `manifest.json` `content_scripts` in load order: `menu-config.js` (pure parse/generate/analyze helpers, no DOM), then `menu-panel.js` (`makeMenuPanel`) and `file-list.js` (`makeFileListWatcher`) which depend on those helpers being in scope, then `content.js` last — it wires the toolbar and constructs the panel/watcher. They share one global scope with no ESM `export`s, so **order matters** — a helper must be defined in an earlier file than its caller. Of the four, only `menu-config.js` has a Node test shim (`test/load-menu-config.mjs`, same pattern as `load-inject.mjs`); the three DOM-heavy files have no Node loader and are exercised only via the browser E2E path. See the "Menu manager (phase 3)" section below.
+**The ISOLATED world is five classic scripts**, listed in `manifest.json` `content_scripts` in load order: `menu-config.js` (pure parse/generate/analyze helpers, no DOM), `blocksplice.js` (pure block-file setup splicing, no DOM — phase 4), then `menu-panel.js` (`makeMenuPanel`) and `file-list.js` (`makeFileListWatcher`) which depend on those helpers being in scope, then `content.js` last — it wires the toolbar and constructs the panel/watcher. They share one global scope with no ESM `export`s, so **order matters** — a helper must be defined in an earlier file than its caller. The two pure-helper files have Node test shims (`test/load-menu-config.mjs`, `test/load-blocksplice.mjs`, same pattern as `load-inject.mjs`) and unit tests; the three DOM-heavy files have no Node loader and are exercised only via the browser E2E path. See the "Menu manager (phase 3)" and "Setup propagation (phase 4)" sections below.
 
 **Why an ISOLATED/MAIN split:** The MAIN-world script (`inject.js`) can see the page's globals (and could in principle use the page's Dexie instance, though we don't); the ISOLATED-world scripts have access to `chrome.runtime` APIs so they can message the service worker. The split is mandatory — only the MAIN world reaches the page's IndexedDB, only the ISOLATED world reaches `chrome.runtime`. They communicate via `window.postMessage` with `pybricks-git:request` / `pybricks-git:response` envelopes; `content.js` reaches the service worker via `chrome.runtime.sendMessage`.
 
@@ -46,8 +46,9 @@ Everything runs in the browser; the only external party is `github.com`:
 
 The engine and UI keep more keys under `chrome.storage.local`:
 - `lastPullPaths` — the snapshot described under "The git engine".
-- `lastPullManifest` — `{protected, menuConfig}`, written by every non-empty Pull (see "The git engine" and "Menu manager"). `protected` is a plain array of paths; consumers **must intersect it with the live file list** before badging/hiding, because a manifest can name paths that don't exist in the editor.
+- `lastPullManifest` — `{protected, menuConfig, setupTemplate, teamSetup}`, written by every non-empty Pull (see "The git engine", "Menu manager", "Setup propagation"). `protected` is a plain array of paths; consumers **must intersect it with the live file list** before badging/hiding, because a manifest can name paths that don't exist in the editor. `teamSetup`/`setupTemplate` are file names (or null) from `.pybricks-git.json`; a null `teamSetup` hides the whole phase-4 new-program/propagate feature.
 - `menuPanel` — the floating panel's persisted `{left, top, open}` (see "Menu manager").
+- `spliceReport` — `{when, updated:[paths], skipped:[{path, reason}]}`, written by an Update-robot-setup run and rendered as the dismissable report block on the next panel open; dismiss sets it to null (see "Setup propagation").
 - `authFlow` — the Device Flow state machine (`{state, ...}` with states `idle` / `pending` / `success` / `error`; a `pending` record also carries `deviceCode`, `userCode`, `verificationUri`, `expiresAt`, `interval`, `startedAt`). The poll loop is storage-driven off this key so it survives service-worker kills; cancel/sign-out overwrite it with `{state: 'idle'}` (there is no storage `remove`).
 
 ## Pybricks IndexedDB schema
@@ -68,7 +69,7 @@ A "block program" is a regular `.py` file whose **first line** is a sentinel com
 <generated Python below>
 ```
 
-The line-1 comment carries the entire Blockly workspace state. The rest of the file is valid Python that Pybricks runs verbatim. Both representations live in the single `_contents.contents` string. **Treat this as opaque text** — never parse, regenerate, or "clean up" the line-1 JSON. Round-trip it byte-for-byte.
+The line-1 comment carries the entire Blockly workspace state. The rest of the file is valid Python that Pybricks runs verbatim. Both representations live in the single `_contents.contents` string. **In the git layer, treat this as opaque text** — Pull/Commit/`upsert-files`/`apply-files` never parse, regenerate, or "clean up" the line-1 JSON; they round-trip it byte-for-byte. **The one sanctioned exception is `src/blocksplice.js`** (phase 4): the setup-splice and new-program features parse and rewrite the line-1 JSON on purpose, under the safety rails documented in "Setup propagation (phase 4)". The empirically-verified format reference is `test/e2e/blocks-format.md` — read it before touching that JSON.
 
 ## The dexie-observable gotcha
 
@@ -119,6 +120,26 @@ The hub's on-device menu is driven by a `menu_config.py` file (a `MENU_ITEMS` li
 
 Consumers of `lastPullManifest.protected` (panel and watcher) **must intersect it with the live file list** before badging/hiding — a manifest can name paths the editor doesn't have.
 
+## Setup propagation (phase 4)
+
+Teams share one robot setup (the `blockGlobalSetup` chain — hub, motors, drive base…). Phase 4 lets a coach push that setup into every mission without kids hand-copying blocks. It is the **only** code that parses the line-1 blocks JSON (the sanctioned exception to the opaque rule above). Two features, both in the menu panel; the format facts they rely on are in `test/e2e/blocks-format.md`.
+
+- **`src/blocksplice.js` — pure, DI-free helpers, no DOM.** Every function returns `{..., error}` and **never throws**; all error strings are kid-facing. Loaded after `menu-config.js`; unit-tested via `test/load-blocksplice.mjs`.
+  - `parseBlocksFile(contents) → {json, python, error}` — split line-1 JSON from the Python body.
+  - `findSetupChain(json) → {head, chain, error}` — locate the `blockGlobalSetup` block and its `next`-linked chain (an empty chain is valid).
+  - `chainVariableRefs(chain, variables) → {refs, error}` — the device variables the chain references (a `Map` id→{name,type}).
+  - `setupSignature(contents) → {signature, error}` — a canonical **string** (`JSON.stringify`) of the setup chain with block/shadow **ids and canvas x/y stripped** and `VAR` id-refs resolved to `{name,type}`. Two setups are "the same" iff their signatures are `===`. This is what the nudge and the splice compare on.
+  - `spliceSetup(target, template) → {contents, changed, error}` — replace `target`'s setup chain with `template`'s, **remapping variable ids by name**: template-only devices are ADDED; a device the target has in setup but the template lacks → **skip** (`error`, "its own device"); a name/type mismatch or id collision → **skip**. `changed:false` when the signatures already match (no-op).
+  - `newProgramContents(teamSetupContents) → {contents, error}` — graft the team's setup chain onto the editor-authored **empty-program scaffold** (so the kid gets a `blockGlobalStart` to program under; a verbatim setup-only copy has none — see blocks-format.md).
+- **New program from team setup** (`menu-panel.js` footer button `[data-pybricks-git-new-program]` + `file-list.js` context entry `[data-pybricks-git-context-item="new-program"]`, shown on every row incl. protected). Seeds a new `.py` via `newProgramContents` → `upsert-files`. Fully hidden when `lastPullManifest.teamSetup` is null. Name-checked against every editor path + the reserved config/setup/protected names.
+- **Update robot setup** (`menu-panel.js` footer button `[data-pybricks-git-update-setup]`, shown only when ≥1 block program's signature differs from the team setup's — those rows get a `[data-pybricks-git-setup-differs]` ⚠ nudge). The propagate flow, whose **safety rails are non-negotiable**:
+  1. **Snapshot first.** Commit the entire editor tree as `Before robot setup update` (via the `commit` op, which pushes). Any throw ABORTS with nothing changed; a `committed:false` "no changes" is fine and proceeds. **No editor file is mutated until the snapshot resolves** — this is the whole safety story.
+  2. Splice each eligible target (block program that isn't the team setup / setup template / menuConfig / protected). Collect `updated` (`changed && !error`) and `skipped` (`{path, reason}`); a no-op is neither.
+  3. `upsert-files` the updated files (never `apply-files`), persist a `spliceReport`, and reload. Only-skips → inline report, no reload; nothing at all → "All programs already match."
+  4. On reload the panel renders a dismissable `[data-pybricks-git-splice-report]` (updated list + per-skip reason) from the persisted report.
+
+Protected files and the team-setup/template files themselves are **never** spliced. The committed E2E `test/e2e/drive-splice.mjs` exercises the whole round-trip (nudge → new program → snapshot-first update → editor regeneration → Commit).
+
 ## Commands
 
 ```bash
@@ -159,10 +180,10 @@ There is no build step and nothing to run alongside the extension — the git wo
 - Chrome Web Store material: `docs/webstore-listing.md` is the copy-paste sheet for the entire developer-dashboard submission (listing text, permission justifications, data-usage checkboxes, reviewer notes). `PRIVACY.md` at the repo root is the listing's privacy policy — its GitHub blob URL (`https://github.com/Lansing-Tech-Studio/pybricks-git-extension/blob/main/PRIVACY.md`) goes in the dashboard, so **don't move or rename it** once the listing is live.
 - ChromeOS: **unmanaged** Chromebooks now work — the whole product is a sideloaded extension with no server or Crostini requirement, so "Load unpacked" (or a future Web Store install) is all that's needed. **Managed** Chromebooks are still the open risk: they block sideloaded extensions, so those need the Web Store listing plus an admin force-install policy.
 
-## Planned work: team-features roadmap (phases 2–4)
+## Team-features roadmap (phases 2–4, all shipped)
 
 The approved design spec lives in the sibling starter-repo checkout: `../pybricks-spike-prime-starter/docs/superpowers/specs/2026-07-08-team-features-roadmap-design.md` (branch `template-v2`, PR #1). **Read it before starting any phase** — it holds the cross-phase contract (`menu_config.py` MENU_ITEMS schema, `.pybricks-git.json` manifest, setup-file convention) plus the decisions already locked with Brendon (git-layer read-only, panel + file-list gestures, full setup splice with safety rails).
 
-Phase 1 (template repo v2) is done in the starter repo; the manifest and menu-config contract committed there are the interfaces this extension codes against. Phase 2 (protected files) is done — engine + notice shipped: the engine reads `.pybricks-git.json` from the fetched tree, `commit` keeps the tree version of protected paths and reports `protectedSkipped`, `pull` returns the `protected` set, and `content.js` shows a dismissable notice (see the ops table and "The git engine"). Phase 3 (floating menu manager) is done — panel + file-list gestures shipped: `menu-config.js`/`menu-panel.js`/`file-list.js` implement the `menu_config.py` editor and protected-file badging, `inject.js` gained the `upsert-files` op, and `pull` persists `lastPullManifest` for the UI (see "Menu manager (phase 3)" and the bridge-ops table). Remaining phase:
+Phase 1 (template repo v2) is done in the starter repo; the manifest and menu-config contract committed there are the interfaces this extension codes against. Phase 2 (protected files) is done — engine + notice shipped: the engine reads `.pybricks-git.json` from the fetched tree, `commit` keeps the tree version of protected paths and reports `protectedSkipped`, `pull` returns the `protected` set, and `content.js` shows a dismissable notice (see the ops table and "The git engine"). Phase 3 (floating menu manager) is done — panel + file-list gestures shipped: `menu-config.js`/`menu-panel.js`/`file-list.js` implement the `menu_config.py` editor and protected-file badging, `inject.js` gained the `upsert-files` op, and `pull` persists `lastPullManifest` for the UI (see "Menu manager (phase 3)" and the bridge-ops table). Phase 4 (new-program-from-template + setup splice) is done — `src/blocksplice.js` (parse/locate/refs/signature/splice/new-program, unit-tested), the new-program + Update-robot-setup panel/file-list UI, the setup-differs nudge, the `spliceReport` + extended `lastPullManifest` keys, and the committed E2E `test/e2e/drive-splice.mjs` all shipped (see "Setup propagation (phase 4)"). The safety rails (snapshot commit first, skip-on-doubt, variable-id remap by name, never touch protected/templates) are implemented and covered end-to-end.
 
-- **Phase 4 — new-program-from-template + setup splice**: the riskiest piece; the splice safety rails (snapshot commit first, skip-on-doubt, variable-ID remap by name) are specified in the spec — don't improvise them.
+**Production prerequisite (the roadmap's only open item, a manual step for Brendon, not code):** the starter repo's `.pybricks-git.json` names `robot_setup_template.py`, but that file was never authored — it must be created **in the code.pybricks.com editor** (block editor state can't be hand-written) and committed to the starter repo, and each team's fork needs a `robot_setup.py` copied from it. Until then the phase-4 features have no `teamSetup` to act on and stay hidden. The extension's phase-4 tests use harvested/derived fixtures, not that unwritten template.
