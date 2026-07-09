@@ -267,7 +267,12 @@ test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullPa
     try {
         await engine.pull();
         const stored = await storage.get('lastPullManifest');
-        assert.deepEqual(stored, { protected: ['menu.py'], menuConfig: 'menu_config.py' });
+        assert.deepEqual(stored, {
+            protected: ['menu.py'],
+            menuConfig: 'menu_config.py',
+            setupTemplate: null,
+            teamSetup: null,
+        });
         assert.deepEqual((await storage.get('lastPullPaths')).sort(), ['a.py', 'menu.py']);
     } finally {
         await server.close();
@@ -279,7 +284,53 @@ test('pull with no manifest stores empty lastPullManifest', async () => {
     try {
         await engine.pull();
         const stored = await storage.get('lastPullManifest');
-        assert.deepEqual(stored, { protected: [], menuConfig: null });
+        assert.deepEqual(stored, {
+            protected: [],
+            menuConfig: null,
+            setupTemplate: null,
+            teamSetup: null,
+        });
+    } finally {
+        await server.close();
+    }
+});
+
+test('pull stores setupTemplate/teamSetup from the manifest', async () => {
+    const { engine, storage, server } = await setupEngine({
+        '.pybricks-git.json': JSON.stringify({
+            schemaVersion: 1,
+            menuConfig: 'menu_config.py',
+            setupTemplate: 'robot_setup_template.py',
+            teamSetup: 'robot_setup.py',
+            protected: ['menu.py'],
+        }),
+        'menu.py': 'MENU = 1\n',
+    });
+    try {
+        await engine.pull();
+        const stored = await storage.get('lastPullManifest');
+        assert.equal(stored.setupTemplate, 'robot_setup_template.py');
+        assert.equal(stored.teamSetup, 'robot_setup.py');
+    } finally {
+        await server.close();
+    }
+});
+
+test('missing/non-string setupTemplate/teamSetup stored as null', async () => {
+    const { engine, storage, server } = await setupEngine({
+        '.pybricks-git.json': JSON.stringify({
+            schemaVersion: 1,
+            setupTemplate: 42, // non-string
+            // teamSetup omitted entirely
+            protected: ['menu.py'],
+        }),
+        'menu.py': 'MENU = 1\n',
+    });
+    try {
+        await engine.pull();
+        const stored = await storage.get('lastPullManifest');
+        assert.equal(stored.setupTemplate, null);
+        assert.equal(stored.teamSetup, null);
     } finally {
         await server.close();
     }

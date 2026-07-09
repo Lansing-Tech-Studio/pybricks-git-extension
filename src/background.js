@@ -105,7 +105,7 @@ const MANIFEST_PATH = '.pybricks-git.json';
 // the phase-3 panel edits. Anything short of a well-formed schemaVersion-1
 // manifest means "no protection" — this never throws.
 async function readManifestInfo(d, fileMap) {
-    const none = { protected: new Set(), menuConfig: null };
+    const none = { protected: new Set(), menuConfig: null, setupTemplate: null, teamSetup: null };
     const entry = fileMap.get(MANIFEST_PATH);
     if (!entry) return none;
     try {
@@ -118,6 +118,8 @@ async function readManifestInfo(d, fileMap) {
                     .filter((p) => typeof p === 'string'),
             ),
             menuConfig: typeof manifest.menuConfig === 'string' ? manifest.menuConfig : null,
+            setupTemplate: typeof manifest.setupTemplate === 'string' ? manifest.setupTemplate : null,
+            teamSetup: typeof manifest.teamSetup === 'string' ? manifest.teamSetup : null,
         };
     } catch {
         return none;
@@ -133,7 +135,7 @@ async function pullOp(d) {
     requireConfigured(s);
     const head = await fetchRemoteHead(d, s);
     const files = [];
-    let manifestInfo = { protected: new Set(), menuConfig: null };
+    let manifestInfo = { protected: new Set(), menuConfig: null, setupTemplate: null, teamSetup: null };
     if (head) {
         const all = await listAllFiles(d, head);
         manifestInfo = await readManifestInfo(d, all);
@@ -154,6 +156,8 @@ async function pullOp(d) {
             lastPullManifest: {
                 protected: [...manifestInfo.protected],
                 menuConfig: manifestInfo.menuConfig,
+                setupTemplate: manifestInfo.setupTemplate,
+                teamSetup: manifestInfo.teamSetup,
             },
         });
     }
