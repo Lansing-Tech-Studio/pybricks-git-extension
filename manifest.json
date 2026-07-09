@@ -22,7 +22,7 @@
   "content_scripts": [
     {
       "matches": ["https://code.pybricks.com/*"],
-      "js": ["src/menu-config.js", "src/menu-panel.js", "src/file-list.js", "src/content.js"],
+      "js": ["src/menu-config.js", "src/blocksplice.js", "src/menu-panel.js", "src/file-list.js", "src/content.js"],
       "run_at": "document_idle",
       "world": "ISOLATED"
     },
