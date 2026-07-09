@@ -133,3 +133,81 @@ None in the extension. The only obstacle was environmental — the Pybricks
 Welcome Tour overlay swallowing trusted clicks — which the driver now dismisses
 before interacting. Zero `Runtime.exceptionThrown` events originated from the
 extension across the run.
+
+---
+
+# `drive-menu.mjs` — phase-3 menu-manager round-trip
+
+A second self-contained driver, built on the same mechanics as `drive.mjs`
+(Chromium auto-discovery, LNA-disable flags, SW settings write, Welcome Tour
+dismissal, trusted CDP input, reload re-attachment, exception capture) — those
+blocks are copied and annotated. It proves the **floating menu manager** works
+end to end against the real UI, not just the unit suite.
+
+## How to run
+
+```bash
+node test/e2e/drive-menu.mjs
+```
+
+Exit code `0` = PASS, non-zero = FAIL. On success it writes `menu-panel.png`
+(committed alongside this README); on failure it writes `menu-failure.png`.
+
+## What it covers
+
+It seeds the bare repo with the **phase-3 template shape** — a
+`.pybricks-git.json` manifest (`{schemaVersion:1, menuConfig:"menu_config.py",
+protected:["menu.py"]}`), a protected `menu.py`, a one-slot `menu_config.py`, a
+plain `mission_01.py`, and a setup-only **blocks** file `arm_moves.py` — then:
+
+1. Writes settings via the SW, dismisses the Welcome Tour, and **Pull**s (label
+   `↓ +4 ~0 -0`; `.pybricks-git.json` is non-`.py`, so only the four `.py`
+   files apply), waiting for the reload.
+2. Asserts the engine persisted `chrome.storage.local.lastPullManifest ===
+   {protected:["menu.py"], menuConfig:"menu_config.py"}` (read via the SW target).
+3. Opens the **Menu** panel (`[data-pybricks-git-menu-btn]`), asserting the
+   panel mounts, shows exactly **1** seed slot (`[data-pybricks-git-slot]`), and
+   offers `[data-pybricks-git-add="arm_moves.lift_arm"]` while **excluding** the
+   protected `menu.py` from the programs list.
+4. Clicks that add button → slot count grows to **2** → clicks
+   `[data-pybricks-git-save]`, which rewrites `menu_config.py` via `upsert-files`
+   and reloads; asserts the panel **auto-reopens** from the persisted `open` flag.
+5. Reads `list-files` from the isolated world and asserts the regenerated
+   `menu_config.py` parses to 2 items with the second being
+   `{display:2, module:"arm_moves", function:"lift_arm", blocks:true}` — and that
+   the raw text contains `"module": "arm_moves", "function": "lift_arm", "blocks": True`.
+6. **Commit**s (trusted-typed message, Enter) → asserts the label reaches
+   `✓ <sha> ↑`, then harness-side: the pushed `menu_config.py` carries the
+   `arm_moves` line and `menu.py` is **byte-identical to the seed** (protection
+   held end to end).
+7. Opens the Explorer (`#pb-toolbar-explorer-button`) and asserts the `menu.py`
+   row carries `[data-pybricks-git-badge]`. If the file list doesn't render in
+   the headless environment this logs a **SKIP** (the badge path is also covered
+   by the Task 7 smoke) rather than failing.
+8. Asserts zero **extension** exceptions across the page and the service worker.
+
+## What PASS looks like
+
+Recorded from a real passing run (Chromium 1228):
+
+```
+[e2e-menu] PASS: Pull label is "↓ +4 ~0 -0" (got "↓ +4 ~0 -0")
+[e2e-menu] PASS: lastPullManifest === {protected:[menu.py], menuConfig:menu_config.py}
+[e2e-menu] PASS: menu panel mounted
+[e2e-menu] PASS: panel shows exactly 1 seed slot (mission_01.run)
+[e2e-menu] PASS: programs list offers add button for arm_moves.lift_arm
+[e2e-menu] PASS: no add button for protected menu.py (excluded from programs)
+[e2e-menu] PASS: adding arm_moves.lift_arm grows slots to 2
+[e2e-menu] PASS: panel auto-reopened after Save reload (persisted open flag)
+[e2e-menu] PASS: menu_config.py contains the arm_moves slot line ("module": "arm_moves", "function": "lift_arm", "blocks": True)
+[e2e-menu] PASS: menu_config.py parses to exactly 2 items
+[e2e-menu] PASS: second item = {display:2, module:arm_moves, function:lift_arm, blocks:true}
+[e2e-menu] PASS: commit label shows "✓ <sha> ↑" (got "✓ c95a7d9 ↑")
+[e2e-menu] PASS: pushed menu_config.py contains the arm_moves slot line
+[e2e-menu] PASS: protected menu.py is byte-identical to the seed (protection held end-to-end)
+[e2e-menu] PASS: menu.py file-list row carries [data-pybricks-git-badge]
+[e2e-menu] PASS: zero extension exceptions (saw 0)
+```
+
+`menu-panel.png` (committed alongside this README) is the screenshot after the
+push, with the menu panel reopened over the editor.
