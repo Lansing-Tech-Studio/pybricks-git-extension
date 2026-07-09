@@ -193,10 +193,34 @@ function makeMenuPanel(deps) {
                 items = parsed.items;
             }
         }
-        // The team-setup file the new-program seed is grafted from and the
-        // splice source. The manifest can name it even when it's not in the
-        // editor yet (kid hasn't Pulled); teamSetupRow null in that case →
-        // createProgram/updateSetup tell them to Pull.
+        // File-derived fields (programs + nudge, teamSetupRow, allPaths, allFiles)
+        // come from fileParts so updateSetup/createProgram can recompute them
+        // from LIVE files at click time — see fileParts.
+        const parts = fileParts(listing, { menuConfigPath, protectedPaths, teamSetup, setupTemplate });
+        return {
+            menuConfigPath, items, protectedPaths, banner, dirty: false,
+            teamSetup, setupTemplate,
+            ...parts, // programs, teamSetupRow, allPaths, allFiles
+            spliceReport: spliceReport || null,
+        };
+    }
+
+    // The file-derived slice of panel state, computed from a fresh list-files
+    // listing: the addable programs (each tagged with splice eligibility + the
+    // setup-differs nudge), the team-setup row + its signature, the full path
+    // set (collision checks), and the full file set (the safety snapshot). Split
+    // out of loadState so updateSetup/createProgram can re-read LIVE files at
+    // CLICK time: the panel can float open a whole session while the kid keeps
+    // editing (Pybricks flushes edits to IDB live), and snapshotting or splicing
+    // the stale panel-open copy would silently lose that work. Deliberately does
+    // NOT touch the menu-slot editing state (items/dirty) — recomputing only the
+    // file parts leaves an unsaved slot reorder intact. `cfg` carries the
+    // manifest-derived fields, which are stable between Pulls.
+    function fileParts(listing, cfg) {
+        const { menuConfigPath, protectedPaths, teamSetup, setupTemplate } = cfg;
+        // The team-setup file the new-program seed is grafted from and the splice
+        // source. The manifest can name it even when it's not in the editor yet
+        // (kid hasn't Pulled); null then → createProgram/updateSetup say to Pull.
         const teamSetupRow = teamSetup
             ? listing.contents.find((c) => c.path === teamSetup) || null
             : null;
@@ -224,17 +248,16 @@ function makeMenuPanel(deps) {
                 if (!sig.error) p.setupDiffers = sig.signature !== teamSig.signature;
             }
         }
-        // Name-collision must consider EVERY editor path, not just menu-eligible
-        // programs (a new .py can't shadow a protected/config/non-program file).
-        const allPaths = filePaths;
         return {
-            menuConfigPath, items, programs, protectedPaths, banner, dirty: false,
-            teamSetup, setupTemplate, teamSetupRow, allPaths,
+            programs,
+            teamSetupRow,
+            // Name-collision must consider EVERY editor path, not just menu-
+            // eligible programs (a new .py can't shadow a protected/config file).
+            allPaths: new Set(listing.contents.map((c) => c.path)),
             // Full editor file set — the snapshot commit before a splice sends
-            // exactly this (path+contents), and it is the source of truth for
-            // what "Before robot setup update" preserves.
+            // exactly this (path+contents), the source of truth for what
+            // "Before robot setup update" preserves.
             allFiles: listing.contents.map((c) => ({ path: c.path, contents: c.contents })),
-            spliceReport: spliceReport || null,
         };
     }
 
@@ -347,6 +370,22 @@ function makeMenuPanel(deps) {
             return;
         }
         const path = name + '.py';
+        // Re-read LIVE files: the panel may have been open a while and the editor
+        // written since loadState. A stale allPaths could miss a just-created
+        // file and let this overwrite it with the seed; a stale teamSetupRow
+        // could graft an out-of-date setup. (Only the file parts are refreshed —
+        // unsaved menu-slot edits in state.items are left untouched.)
+        let parts;
+        try {
+            parts = fileParts(await pageRequest('list-files'), state);
+        } catch (err) {
+            setStatus(`Couldn't read your files: ${err.message}`);
+            return;
+        }
+        if (!parts.teamSetupRow) {
+            setStatus(`Pull first — your repo's ${state.teamSetup} isn't in the editor yet.`);
+            return;
+        }
         // Reserved names (config/teamSetup/setupTemplate/protected) plus every
         // path currently in the editor. protectedPaths only holds files that
         // exist; the manifest-named config/setup files are added explicitly so
@@ -355,14 +394,14 @@ function makeMenuPanel(deps) {
             [state.menuConfigPath, state.teamSetup, state.setupTemplate, ...state.protectedPaths]
                 .filter(Boolean),
         );
-        if (state.allPaths.has(path) || reserved.has(path)) {
+        if (parts.allPaths.has(path) || reserved.has(path)) {
             setStatus(`${path} already exists — pick another name.`);
             return;
         }
         // Graft the team's setup chain onto the editor-authored empty-program
         // scaffold so the kid gets a blockGlobalStart to program under. On any
         // splice doubt, write nothing and surface the kid-facing reason.
-        const seed = newProgramContents(state.teamSetupRow.contents);
+        const seed = newProgramContents(parts.teamSetupRow.contents);
         if (seed.error) {
             setStatus(`Couldn't set up the program: ${seed.error}`);
             return;
@@ -386,16 +425,31 @@ function makeMenuPanel(deps) {
     // throws, nothing is spliced and nothing is written — the kid can always
     // get back to exactly what they had.
     async function updateSetup(btn) {
-        if (!state.teamSetupRow) {
-            setStatus(`Pull first — your repo's ${state.teamSetup} isn't in the editor yet.`);
+        if (btn) btn.disabled = true;
+        // Re-read LIVE files at click time. The panel can float open for a whole
+        // session while the kid keeps editing; the snapshot and the splice MUST
+        // act on what's in the editor NOW, not the stale panel-open copy — a
+        // stale snapshot wouldn't preserve the recent edits it's meant to save,
+        // and a stale splice would overwrite them. (Only file parts are
+        // refreshed; unsaved menu-slot edits in state.items are left alone.)
+        let parts;
+        try {
+            parts = fileParts(await pageRequest('list-files'), state);
+        } catch (err) {
+            setStatus(`Couldn't read your files: ${err.message}`);
+            if (btn) btn.disabled = false;
             return;
         }
-        if (btn) btn.disabled = true;
+        if (!parts.teamSetupRow) {
+            setStatus(`Pull first — your repo's ${state.teamSetup} isn't in the editor yet.`);
+            if (btn) btn.disabled = false;
+            return;
+        }
         setStatus('Saving a safety snapshot…');
         // Snapshot the ENTIRE editor tree as it stands now. A "no changes"
         // result (committed:false) means the tree already matches the remote —
         // still safe to proceed. Only a THROW aborts.
-        const files = state.allFiles.map(({ path, contents }) => ({ path, contents }));
+        const files = parts.allFiles.map(({ path, contents }) => ({ path, contents }));
         try {
             await serverRequest('commit', { files, message: 'Before robot setup update' });
         } catch (err) {
@@ -405,12 +459,12 @@ function makeMenuPanel(deps) {
         }
         // Snapshot is safe on the remote — now splice. Each eligible target is
         // a block program that isn't the team setup / setup template itself
-        // (menuConfig + protected are already out of state.programs).
+        // (menuConfig + protected are already out of parts.programs).
         const updated = [];
         const skipped = [];
-        for (const p of state.programs) {
+        for (const p of parts.programs) {
             if (!p.spliceEligible) continue;
-            const res = spliceSetup(p.contents, state.teamSetupRow.contents);
+            const res = spliceSetup(p.contents, parts.teamSetupRow.contents);
             if (res.error) { skipped.push({ path: p.path, reason: res.error }); continue; }
             if (res.changed) updated.push({ path: p.path, contents: res.contents });
         }

@@ -115,6 +115,23 @@ describe('setupSignature', () => {
         // variables[10] is "prime hub", referenced by the chain: error, not throw.
         assert.notEqual(api.setupSignature(withNullAt(10)).error, null);
     });
+    test('pathologically deep chain node -> error, never throws (stack guard)', () => {
+        // A valid setup chain whose single node carries a deeply nested field.
+        // JSON.parse tolerates it but the recursive canonicalize would overflow
+        // the stack — the never-throws contract must degrade to an error string
+        // (loadState calls setupSignature bare, so an unguarded throw would wedge
+        // the whole panel open).
+        const N = 80000;
+        const deep = '{"a":'.repeat(N) + '1' + '}'.repeat(N);
+        const line1 =
+            '{"blocks":{"languageVersion":0,"blocks":[{"type":"blockGlobalSetup",' +
+            '"next":{"block":{"type":"variables_set_motor","extra":' + deep + '}}}]},"variables":[]}';
+        const contents = SENTINEL + line1 + '\nprint()\n';
+        let sig;
+        assert.doesNotThrow(() => { sig = api.setupSignature(contents); });
+        assert.equal(sig.signature, null);
+        assert.notEqual(sig.error, null);
+    });
 });
 
 // --- Line-1 surgery helpers, used to build variant fixtures for the splice. ---

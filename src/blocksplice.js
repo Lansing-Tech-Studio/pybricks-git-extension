@@ -72,49 +72,63 @@ function variablesById(variables) {
 // variables_get_* shadow carries {id, name, type} but the variables array is
 // the source of truth for resolution).
 function chainVariableRefs(chain, variables) {
-    const byId = variablesById(variables);
-    const refs = new Map();
-    let error = null;
-    (function walk(node) {
-        if (error || !node || typeof node !== 'object') return;
-        if (Array.isArray(node)) { node.forEach(walk); return; }
-        if (node.VAR && typeof node.VAR === 'object' && typeof node.VAR.id === 'string') {
-            const meta = byId.get(node.VAR.id);
-            if (!meta) { error = 'a device in the setup section is missing from the file’s variable list'; return; }
-            refs.set(node.VAR.id, meta);
-        }
-        for (const v of Object.values(node)) walk(v);
-    })(chain);
-    if (error) return { refs: null, error };
-    return { refs, error: null };
+    // try/catch backstop: the walk recurses over attacker-controllable JSON, so
+    // a pathologically deep tree could blow the stack. Never-throws is the
+    // locked contract for every function here — degrade to an error string.
+    try {
+        const byId = variablesById(variables);
+        const refs = new Map();
+        let error = null;
+        (function walk(node) {
+            if (error || !node || typeof node !== 'object') return;
+            if (Array.isArray(node)) { node.forEach(walk); return; }
+            if (node.VAR && typeof node.VAR === 'object' && typeof node.VAR.id === 'string') {
+                const meta = byId.get(node.VAR.id);
+                if (!meta) { error = 'a device in the setup section is missing from the file’s variable list'; return; }
+                refs.set(node.VAR.id, meta);
+            }
+            for (const v of Object.values(node)) walk(v);
+        })(chain);
+        if (error) return { refs: null, error };
+        return { refs, error: null };
+    } catch {
+        return { refs: null, error: "couldn't read the setup section" };
+    }
 }
 
 function setupSignature(contents) {
-    const parsed = parseBlocksFile(contents);
-    if (parsed.error) return { signature: null, error: parsed.error };
-    const found = findSetupChain(parsed.json);
-    if (found.error) return { signature: null, error: found.error };
-    const byId = variablesById(parsed.json.variables);
-    let danglingRef = false;
-    const canon = (function clone(node) {
-        if (Array.isArray(node)) return node.map(clone);
-        if (!node || typeof node !== 'object') return node;
-        const out = {};
-        for (const [k, v] of Object.entries(node)) {
-            if (k === 'id') continue; // block/shadow ids are churn, not meaning
-            if (k === 'x' || k === 'y') continue; // canvas position is not meaning
-            if (k === 'VAR' && v && typeof v === 'object' && typeof v.id === 'string') {
-                const meta = byId.get(v.id);
-                if (!meta) { danglingRef = true; return null; }
-                out[k] = { name: meta.name, type: meta.type };
-                continue;
+    // try/catch backstop (same reason as chainVariableRefs): the canonicalize
+    // recurses over the line-1 JSON, and loadState calls this bare per program —
+    // an unguarded stack overflow here would wedge the whole panel open.
+    try {
+        const parsed = parseBlocksFile(contents);
+        if (parsed.error) return { signature: null, error: parsed.error };
+        const found = findSetupChain(parsed.json);
+        if (found.error) return { signature: null, error: found.error };
+        const byId = variablesById(parsed.json.variables);
+        let danglingRef = false;
+        const canon = (function clone(node) {
+            if (Array.isArray(node)) return node.map(clone);
+            if (!node || typeof node !== 'object') return node;
+            const out = {};
+            for (const [k, v] of Object.entries(node)) {
+                if (k === 'id') continue; // block/shadow ids are churn, not meaning
+                if (k === 'x' || k === 'y') continue; // canvas position is not meaning
+                if (k === 'VAR' && v && typeof v === 'object' && typeof v.id === 'string') {
+                    const meta = byId.get(v.id);
+                    if (!meta) { danglingRef = true; return null; }
+                    out[k] = { name: meta.name, type: meta.type };
+                    continue;
+                }
+                out[k] = clone(v);
             }
-            out[k] = clone(v);
-        }
-        return out;
-    })(found.chain);
-    if (danglingRef) return { signature: null, error: 'a device in the setup section is missing from the file’s variable list' };
-    return { signature: JSON.stringify(canon), error: null };
+            return out;
+        })(found.chain);
+        if (danglingRef) return { signature: null, error: 'a device in the setup section is missing from the file’s variable list' };
+        return { signature: JSON.stringify(canon), error: null };
+    } catch {
+        return { signature: null, error: "couldn't read the setup section" };
+    }
 }
 
 // The setup marker is version-dependent (blocks-format.md Q1/consequence 3):
