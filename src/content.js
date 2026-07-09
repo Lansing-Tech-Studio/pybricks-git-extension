@@ -191,11 +191,16 @@ function showProtectedNotice(paths) {
     const one = paths.length === 1;
     const box = document.createElement('div');
     box.dataset.pybricksGitNotice = '1';
+    box.setAttribute('role', 'status');
+    box.tabIndex = 0;
     box.textContent =
-        `Your changes to ${paths.join(', ')} weren't saved — ` +
-        `${one ? 'that file is' : 'those files are'} managed by your coach's repo; ` +
-        `Pull to restore ${one ? 'it' : 'them'}.`;
-    box.title = 'Click to dismiss';
+        `${paths.join(', ')} ${one ? 'is' : 'are'} managed by your coach's repo, ` +
+        `so your ${one ? 'version wasn\'t' : 'versions weren\'t'} committed. ` +
+        `Pull to match the repo.`;
+    box.title = 'Click or press Escape to dismiss';
+    box.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' || ev.key === 'Enter' || ev.key === ' ') box.remove();
+    });
     Object.assign(box.style, {
         position: 'fixed',
         top: '48px',

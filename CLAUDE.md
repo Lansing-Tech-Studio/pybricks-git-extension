@@ -16,14 +16,18 @@ Everything runs in the browser; the only external party is `github.com`:
 [code.pybricks.com page]
   ├─ inject.js (MAIN world)      ─── opens Pybricks' IndexedDB directly
   │   ↕ window.postMessage (pybricks-git:request / :response, id-correlated)
-  ├─ content.js (ISOLATED world) ─── injects toolbar buttons; bridges the page
+  ├─ ISOLATED world (4 scripts, loaded in this order):
+  │     menu-config.js → menu-panel.js → file-list.js → content.js
+  │   ─── inject toolbar/panel/file-list UI; bridge the page
   │   ↕ chrome.runtime.sendMessage    to the service worker
   └─ background.js (service worker) ─ the git engine (vendored isomorphic-git)
        ↕ HTTPS (GitHub smart-HTTP git protocol)
      [github.com — the team's fork]
 ```
 
-**Why two content scripts:** The MAIN-world script can see the page's globals (and could in principle use the page's Dexie instance, though we don't); the ISOLATED-world script has access to `chrome.runtime` APIs so it can message the service worker. The MAIN↔ISOLATED split is mandatory — only the MAIN world reaches the page's IndexedDB, only the ISOLATED world reaches `chrome.runtime`. They communicate via `window.postMessage` with `pybricks-git:request` / `pybricks-git:response` envelopes; `content.js` reaches the service worker via `chrome.runtime.sendMessage`.
+**The ISOLATED world is four classic scripts**, listed in `manifest.json` `content_scripts` in load order: `menu-config.js` (pure parse/generate/analyze helpers, no DOM), then `menu-panel.js` (`makeMenuPanel`) and `file-list.js` (`makeFileListWatcher`) which depend on those helpers being in scope, then `content.js` last — it wires the toolbar and constructs the panel/watcher. They share one global scope (no ESM `export`s; each is loaded by a `test/load-*.mjs` shim the same way `inject.js` is), so **order matters** — a helper must be defined in an earlier file than its caller. See the "Menu manager (phase 3)" section below.
+
+**Why an ISOLATED/MAIN split:** The MAIN-world script (`inject.js`) can see the page's globals (and could in principle use the page's Dexie instance, though we don't); the ISOLATED-world scripts have access to `chrome.runtime` APIs so they can message the service worker. The split is mandatory — only the MAIN world reaches the page's IndexedDB, only the ISOLATED world reaches `chrome.runtime`. They communicate via `window.postMessage` with `pybricks-git:request` / `pybricks-git:response` envelopes; `content.js` reaches the service worker via `chrome.runtime.sendMessage`.
 
 **Message ops (`content.js` ↔ `background.js`):** all one-shot request/response over `chrome.runtime.sendMessage`; any op can resolve to `{error}` on failure.
 
@@ -40,7 +44,11 @@ Everything runs in the browser; the only external party is `github.com`:
 
 **Settings** live in `chrome.storage.local` under the key `settings`: `{repoUrl, branch, token, name, email, login}`, set via the action popup (`src/popup.html` / `popup.js`). `token` is either a GitHub OAuth token (from **Sign in with GitHub**, Device Flow) or a fine-grained PAT pasted under the popup's **Advanced** section. `login` is the GitHub login, set by OAuth sign-in and empty for pasted PATs. `email` is derived from the login (`<login>@users.noreply.github.com`, or `team@users.noreply.github.com` when unknown) during sign-in or **Test connection**, not typed. `branch` defaults to `main`. **Sign out** clears `token`/`email`/`login` but keeps `repoUrl`/`branch`/`name`.
 
-The engine keeps two more keys: `lastPullPaths` — the snapshot described under "The git engine" — and `authFlow`, the Device Flow state machine (`{state, ...}` with states `idle` / `pending` / `success` / `error`; a `pending` record also carries `deviceCode`, `userCode`, `verificationUri`, `expiresAt`, `interval`, `startedAt`). The poll loop is storage-driven off this key so it survives service-worker kills; cancel/sign-out overwrite it with `{state: 'idle'}` (there is no storage `remove`).
+The engine and UI keep more keys under `chrome.storage.local`:
+- `lastPullPaths` — the snapshot described under "The git engine".
+- `lastPullManifest` — `{protected, menuConfig}`, written by every non-empty Pull (see "The git engine" and "Menu manager"). `protected` is a plain array of paths; consumers **must intersect it with the live file list** before badging/hiding, because a manifest can name paths that don't exist in the editor.
+- `menuPanel` — the floating panel's persisted `{left, top, open}` (see "Menu manager").
+- `authFlow` — the Device Flow state machine (`{state, ...}` with states `idle` / `pending` / `success` / `error`; a `pending` record also carries `deviceCode`, `userCode`, `verificationUri`, `expiresAt`, `interval`, `startedAt`). The poll loop is storage-driven off this key so it survives service-worker kills; cancel/sign-out overwrite it with `{state: 'idle'}` (there is no storage `remove`).
 
 ## Pybricks IndexedDB schema
 
@@ -68,13 +76,26 @@ Pybricks wraps Dexie with `dexie-observable`, which records mutations in a hidde
 
 If this becomes painful, the fix paths are (in order of effort): bundle Dexie into the extension and write through it; reverse-engineer `_changes` row format and write directly; or expose Pybricks' Dexie instance via a hook into the page's React tree. None are necessary for the current prototype.
 
+## inject.js bridge ops (page ↔ MAIN world)
+
+The ISOLATED scripts reach IndexedDB by `window.postMessage`-ing `inject.js` (`pybricks-git:request`, id-correlated). `inject.js:handle()` dispatches these ops:
+
+| Op | Payload | Returns | Notes |
+|---|---|---|---|
+| `list-databases` | — | `indexedDB.databases()` result | discovery/debug helper |
+| `list-files` | — | `{metadata, contents}` | `contents` is `[{path, contents}]` with binary fields stripped |
+| `apply-files` | `{files}` | `{added, changed, deleted, unchanged}` | full-sync: adds/updates listed paths **and DELETES any IDB path not in `files`**. Used by Pull. **Never reuse for single-file writes.** |
+| `upsert-files` | `{files}` | `{added, changed, deleted, unchanged}` | partial write: updates/inserts only the listed paths, **never deletes** (`deleted` is always 0). Used by the menu panel's Save. |
+
+`apply-files` and `upsert-files` are the same `writeFiles(files, deleteUnlisted)` with the delete pass toggled; both preserve each existing metadata row's `viewState`/`uuid` and only touch `sha256`/`contents`.
+
 ## The git engine (`src/background.js`)
 
 The service worker is the whole git implementation. It is **stateless**: there is no working tree and no persistent clone. Every operation starts by fetching the remote branch tip, and the commit tree is built directly against that tip in memory, then pushed. `makeEngine(deps)` takes its `git` / `http` / `fs` / `gitdir` / `storage` from outside so the same file runs under vendored isomorphic-git in Chrome and under Node's real `fs`/http in tests.
 
 - **Fetch the head.** `fetchRemoteHead` does a bare `init`, registers a named `origin` remote (fetching a raw URL throws `NoRefspecError`, so the remote is required), then a shallow single-branch `fetch`. A branch with no commits yet (fresh fork) resolves to `null` — `fetchHead: null` on most hosts, or a `Could not find refs/heads/<branch>` throw that we special-case as empty. Every *other* fetch error (404, 401, broken response) is rethrown so the user sees the real problem instead of a false "no commits".
-- **Pull** peels the fetched commit's tree, decodes every `.py` blob, and returns `{head, files, pullWarning, protected}` (`pullWarning` non-empty only for an empty fork). It also reads the `.pybricks-git.json` manifest from the fetched tree (schemaVersion-1 guard; absent or malformed → no protection) and returns the `protected` path list. It records `lastPullPaths` in `chrome.storage.local` — the set of paths the editor was last shown.
-- **Commit** is a stateless build-on-head: fetch the tip, take its full tree, overlay the editor's files (writing blobs), and delete tracked `.py` files that aren't in the payload — **but only if the path was in the last Pull's `lastPullPaths` snapshot.** Files never seen by a Pull (fork starter code) are kept and returned in `preserved`. Protected paths (from the same `.pybricks-git.json` manifest) always keep the tree's version — edits, new files, and deletions are all skipped — and are reported in `protectedSkipped` when the editor diverged; `content.js` shows a dismissable notice for them. If the recomputed tree equals the head's tree, it returns `{committed: false, message: 'no changes'}`. Empty commit message → `Update from Pybricks at <ISO-8601>`.
+- **Pull** peels the fetched commit's tree, decodes every `.py` blob, and returns `{head, files, pullWarning, protected}` (`pullWarning` non-empty only for an empty fork). It also reads the `.pybricks-git.json` manifest from the fetched tree via `readManifestInfo` (schemaVersion-1 guard; absent or malformed → no protection, `menuConfig: null`) and returns the `protected` path list. On a non-empty pull it records **both** `lastPullPaths` (the set of paths the editor was last shown) and `lastPullManifest` (`{protected, menuConfig}`) in `chrome.storage.local`; an empty/missing-branch pull writes neither, so the last real snapshot survives. `lastPullManifest` is what the phase-3 panel and file-list watcher read.
+- **Commit** is a stateless build-on-head: fetch the tip, take its full tree, overlay the editor's files (writing blobs), and delete tracked `.py` files that aren't in the payload — **but only if the path was in the last Pull's `lastPullPaths` snapshot.** Files never seen by a Pull (fork starter code) are kept and returned in `preserved`. Protected paths (from the same `.pybricks-git.json` manifest) always keep the tree's version — edits, new files, and deletions are all skipped — and are reported in `protectedSkipped` when the editor diverged; `content.js` shows a dismissable notice for them. **The order of `protectedSkipped` is unspecified** — deletions are appended while walking the existing tree, edits/creates while walking the payload, so callers must treat it as a set. If the recomputed tree equals the head's tree, it returns `{committed: false, message: 'no changes'}`. Empty commit message → `Update from Pybricks at <ISO-8601>`.
 - **Push with retry.** After writing the commit and updating the local ref, it pushes. A `PushRejectedError` (someone else pushed between our fetch and push) restarts the whole build-on-head loop, up to **3 attempts**, so the commit lands on the newest tip. Any other push error is fatal.
 - **Auth** is `onAuth` returning `{username: 'x-access-token', password: token}` — the GitHub convention for authenticating over HTTPS with a token (the same shape works for an OAuth token or a PAT).
 - **The gitdir is a disposable cache.** `lightning-fs` backs a bare gitdir at `/pybricks.git`; it only holds fetched objects between the fetch and the push. It can be wiped at any time with no data loss — the source of truth is always the GitHub fork.
@@ -87,6 +108,16 @@ The same file also holds the OAuth Device Flow. `makeAuthFlow(deps)` follows the
 - **Survives worker kills.** A module-level `activePollDeviceCode` marks which flow this worker instance is polling. On every service-worker wake-up the wiring block calls `auth.status()`, which restarts the poll loop for a stranded `pending` record — so sign-in completes even if the popup was closed.
 - **On success** the token is written into `settings.token`; `settings.login` and `settings.email` (`<login>@users.noreply.github.com`) are derived from a best-effort `api.github.com/user` lookup (on failure the token is still saved with a team fallback identity).
 - **`GITHUB_CLIENT_ID`** at the top of `background.js` holds the registered OAuth App's Client ID (a public identifier, safe to commit — Device Flow uses no client secret). If it's ever emptied, `start` throws a clear error and the paste-a-PAT path still works.
+
+## Menu manager (phase 3)
+
+The hub's on-device menu is driven by a `menu_config.py` file (a `MENU_ITEMS` list of slot dicts) in the fork. Phase 3 adds a floating panel and file-list gestures to edit it without hand-writing Python. Three ISOLATED scripts implement it (load order above):
+
+- **`menu-config.js` — pure helpers, no DOM.** `parseMenuConfig` (a hand-rolled recursive-descent `PyLiteralParser` over the allowed Python-literal subset — int/str/bool/None/list-of-str, comments skipped), `generateMenuConfig` (rewrites the **whole** file from a fixed kid-facing header + normalized key order; comments inside the list are **not** preserved), `validateDisplay`/`validateItem`, and `analyzeProgram(path, contents)` which decides menu eligibility: bare module name, blocks sentinel, `setupOnly` (importing runs nothing → offer individual `def`s), and the public top-level method names. Loaded in tests by `test/load-menu-config.mjs`.
+- **`menu-panel.js` — `makeMenuPanel(deps)`.** A draggable floating panel listing the current slots (reorder by drag or ▲/▼, toggle `enabled`, remove, edit the hub display via a number/char/5×5-grid popover) and the addable programs. Position and open state persist under the **`menuPanel`** storage key (`{left, top, open}`); `content.js` reopens the panel after a reload when `open` was true. **Save always reloads.** Save regenerates the file and writes it via `upsert-files` (single-path, never deletes), then `location.reload()`s — because dexie-observable can't see our raw IDB write, and if `menu_config.py` happens to be open in Monaco the app's stale buffer would clobber our save on its next write; reloading discards that buffer. The panel resolves the config path and protected set from `lastPullManifest` (defaulting to `menu_config.py`), and only lists protected files as programs after intersecting with the live `list-files` result.
+- **`file-list.js` — `makeFileListWatcher(deps)`.** A `MutationObserver` on `document.body` (debounced 250ms) that finds the page's file rows and (a) adds a 🔒 badge to protected files and (b) attaches right-click / long-press "Add to menu" gestures that call back into `menuPanel.addSlot`. **The selectors are documented in `test/e2e/file-list-dom.md`** — primary path is the Blueprint `[role="tree"][aria-label="Files"]` / `li[role="treeitem"]` / `span.bp5-tree-node-label` structure, with a scoped exact-text fallback. **Gated to the mounted Explorer:** it bails when neither `div.pb-activities-tabview` nor the tree is present, because the Explorer unmounts when closed (the default and the post-Pull-reload state) and without the gate every settled editor keystroke would trigger a `list-files` round-trip and a text-walk that could badge editor chrome. The badge is inserted as a **sibling after** the label (never inside it) so the label's `textContent` stays a clean path for the next decorate. `protected` here also comes from `lastPullManifest`.
+
+Consumers of `lastPullManifest.protected` (panel and watcher) **must intersect it with the live file list** before badging/hiding — a manifest can name paths the editor doesn't have.
 
 ## Commands
 
@@ -132,7 +163,6 @@ There is no build step and nothing to run alongside the extension — the git wo
 
 The approved design spec lives in the sibling starter-repo checkout: `../pybricks-spike-prime-starter/docs/superpowers/specs/2026-07-08-team-features-roadmap-design.md` (branch `template-v2`, PR #1). **Read it before starting any phase** — it holds the cross-phase contract (`menu_config.py` MENU_ITEMS schema, `.pybricks-git.json` manifest, setup-file convention) plus the decisions already locked with Brendon (git-layer read-only, panel + file-list gestures, full setup splice with safety rails).
 
-Phase 1 (template repo v2) is done in the starter repo; the manifest and menu-config contract committed there are the interfaces this extension codes against. Phase 2 (protected files) is done — engine + notice shipped: the engine reads `.pybricks-git.json` from the fetched tree, `commit` keeps the tree version of protected paths and reports `protectedSkipped`, `pull` returns the `protected` set, and `content.js` shows a dismissable notice (see the ops table and "The git engine"). Remaining phases, in order, all in this repo:
+Phase 1 (template repo v2) is done in the starter repo; the manifest and menu-config contract committed there are the interfaces this extension codes against. Phase 2 (protected files) is done — engine + notice shipped: the engine reads `.pybricks-git.json` from the fetched tree, `commit` keeps the tree version of protected paths and reports `protectedSkipped`, `pull` returns the `protected` set, and `content.js` shows a dismissable notice (see the ops table and "The git engine"). Phase 3 (floating menu manager) is done — panel + file-list gestures shipped: `menu-config.js`/`menu-panel.js`/`file-list.js` implement the `menu_config.py` editor and protected-file badging, `inject.js` gained the `upsert-files` op, and `pull` persists `lastPullManifest` for the UI (see "Menu manager (phase 3)" and the bridge-ops table). Remaining phase:
 
-- **Phase 3 — floating menu manager**: panel + file-list context menu writing `menu_config.py`. Needs a new `inject.js` `upsert-files` op (**`apply-files` deletes any path not in its payload — never reuse it for single-file writes**) and a `MutationObserver` for the page's file list (none exists today; only the toolbar is anchored).
 - **Phase 4 — new-program-from-template + setup splice**: the riskiest piece; the splice safety rails (snapshot commit first, skip-on-doubt, variable-ID remap by name) are specified in the spec — don't improvise them.
