@@ -98,11 +98,6 @@ async function listAllFiles(d, commitOid) {
     return out;
 }
 
-// Reads the repo's protection manifest (.pybricks-git.json at the root) out
-// of an already-listed tree. Anything short of a well-formed schemaVersion-1
-// manifest with an array `protected` means "no protection" — forks that
-// predate the manifest (or carry a broken one) must keep working, so this
-// never throws.
 const MANIFEST_PATH = '.pybricks-git.json';
 
 // Reads the repo manifest (.pybricks-git.json at the root) out of an

@@ -17,6 +17,10 @@ function makeMenuPanel(deps) {
     // callers now await THIS promise, so `state`/`panel` are guaranteed set by
     // the time open() resolves for any of them.
     let opening = null;
+    // Dismiss routine for the currently-open display-editor popover, or null.
+    // Removes the popover plus its capture-phase window listeners; close() and
+    // a reopen both route through it so nothing leaks (see openDisplayEditor).
+    let displayEditorDismiss = null;
 
     async function toggle() {
         if (panel) close();
@@ -51,6 +55,7 @@ function makeMenuPanel(deps) {
 
     function close() {
         if (!panel) return;
+        if (displayEditorDismiss) displayEditorDismiss();
         panel.remove();
         panel = null;
         void persist(false);
@@ -191,6 +196,7 @@ function makeMenuPanel(deps) {
     // --- render ----------------------------------------------------------
 
     function render() {
+        if (!panel) return;
         const body = panel.querySelector('[data-pybricks-git-panel-body]');
         body.textContent = '';
 
@@ -423,9 +429,25 @@ function makeMenuPanel(deps) {
     // --- display editor popover ------------------------------------------
 
     function openDisplayEditor(anchorBtn, item) {
-        document.querySelector('[data-pybricks-git-display-editor]')?.remove();
+        if (displayEditorDismiss) displayEditorDismiss(); // replace any open one
         const pop = document.createElement('div');
         pop.dataset.pybricksGitDisplayEditor = '1';
+
+        // Single dismissal path for ALL exits (Apply, Cancel, Escape, outside
+        // pointerdown, panel close) so the capture-phase window listeners
+        // always come off with the popover (mirrors file-list.js showMenu).
+        const dismiss = () => {
+            pop.remove();
+            window.removeEventListener('pointerdown', onPointerDown, true);
+            window.removeEventListener('keydown', onKey, true);
+            if (displayEditorDismiss === dismiss) displayEditorDismiss = null;
+        };
+        const onPointerDown = (ev) => {
+            if (!pop.contains(ev.target)) dismiss();
+        };
+        const onKey = (ev) => {
+            if (ev.key === 'Escape') dismiss();
+        };
         const rect = anchorBtn.getBoundingClientRect();
         Object.assign(pop.style, {
             position: 'fixed',
@@ -521,17 +543,21 @@ function makeMenuPanel(deps) {
                 return;
             }
             item.display = next;
-            pop.remove();
+            dismiss();
             markDirty();
         });
-        const cancel = miniIconButton('Cancel', 'Keep the old display', () => pop.remove());
+        const cancel = miniIconButton('Cancel', 'Keep the old display', () => dismiss());
         const buttons = document.createElement('div');
         buttons.style.marginTop = '6px';
         buttons.appendChild(apply);
         buttons.appendChild(cancel);
         pop.appendChild(buttons);
 
+        window.addEventListener('pointerdown', onPointerDown, true);
+        window.addEventListener('keydown', onKey, true);
+
         document.body.appendChild(pop);
+        displayEditorDismiss = dismiss;
     }
 
     // --- save ------------------------------------------------------------
