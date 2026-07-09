@@ -5,7 +5,10 @@
 // Classic script — no exports. content.js calls makeMenuPanel({...}).
 
 function makeMenuPanel(deps) {
-    const { pageRequest, storageGet, storageSet, reload } = deps;
+    // serverRequest is added now for Task 6 (Pull-and-splice); Task 5 only uses
+    // pageRequest/storage/reload, but keeping it in the deps contract here lets
+    // content.js wire it once.
+    const { pageRequest, storageGet, storageSet, reload, serverRequest } = deps;
 
     let panel = null;
     let pos = { left: 80, top: 80 };
@@ -166,6 +169,10 @@ function makeMenuPanel(deps) {
             storageGet('lastPullManifest'),
         ]);
         const menuConfigPath = (manifest && manifest.menuConfig) || 'menu_config.py';
+        // No default for teamSetup/setupTemplate: a null teamSetup hides the
+        // whole New-program feature (no footer button, no context entry).
+        const teamSetup = (manifest && manifest.teamSetup) || null;
+        const setupTemplate = (manifest && manifest.setupTemplate) || null;
         const filePaths = new Set(listing.contents.map((c) => c.path));
         // Manifests can name paths that aren't in the editor — only badge/hide
         // files that actually exist.
@@ -190,7 +197,19 @@ function makeMenuPanel(deps) {
             .map((c) => analyzeProgram(c.path, c.contents))
             .filter((p) => p.module)
             .sort((a, b) => a.module.localeCompare(b.module));
-        return { menuConfigPath, items, programs, protectedPaths, banner, dirty: false };
+        // The team-setup file the new-program seed is grafted from. The manifest
+        // can name it even when it's not in the editor yet (kid hasn't Pulled);
+        // teamSetupRow null in that case → createProgram tells them to Pull.
+        const teamSetupRow = teamSetup
+            ? listing.contents.find((c) => c.path === teamSetup) || null
+            : null;
+        // Name-collision must consider EVERY editor path, not just menu-eligible
+        // programs (a new .py can't shadow a protected/config/non-program file).
+        const allPaths = filePaths;
+        return {
+            menuConfigPath, items, programs, protectedPaths, banner, dirty: false,
+            teamSetup, setupTemplate, teamSetupRow, allPaths,
+        };
     }
 
     // --- render ----------------------------------------------------------
@@ -229,11 +248,96 @@ function makeMenuPanel(deps) {
         save.disabled = !state.dirty;
         styleMiniButton(save);
         save.addEventListener('click', () => void saveConfig(save));
+        if (state.teamSetup) {
+            const newBtn = miniIconButton(
+                '+ New program',
+                'Start a new block program with your robot setup',
+                () => showNewProgramRow(),
+            );
+            newBtn.dataset.pybricksGitNewProgram = '1';
+            footer.appendChild(newBtn);
+        }
         const status = document.createElement('span');
         status.dataset.pybricksGitStatus = '1';
         footer.appendChild(save);
         footer.appendChild(status);
         body.appendChild(footer);
+    }
+
+    // --- new program from team setup -------------------------------------
+
+    // Inline name row under the panel body. Guarded against double-open. When
+    // the manifest names a teamSetup file the editor doesn't have yet, there's
+    // nothing to graft from → tell the kid to Pull instead of showing the row.
+    function showNewProgramRow() {
+        if (!panel) return;
+        if (panel.querySelector('[data-pybricks-git-new-name]')) {
+            panel.querySelector('[data-pybricks-git-new-name]').focus();
+            return;
+        }
+        if (!state.teamSetupRow) {
+            setStatus(`Pull first — your repo's ${state.teamSetup} isn't in the editor yet.`);
+            return;
+        }
+        const row = document.createElement('div');
+        Object.assign(row.style, { display: 'flex', gap: '6px', marginTop: '6px' });
+        const input = document.createElement('input');
+        input.dataset.pybricksGitNewName = '1';
+        input.type = 'text';
+        input.placeholder = 'program name (letters, digits, _)';
+        Object.assign(input.style, {
+            flex: '1', padding: '4px 8px', background: '#1e1e1e', color: '#ddd',
+            border: '1px solid #555', borderRadius: '4px', font: 'inherit',
+        });
+        const create = miniIconButton('Create', 'Create the program', () =>
+            void createProgram(input.value.trim()),
+        );
+        create.dataset.pybricksGitNewCreate = '1';
+        input.addEventListener('keydown', (ev) => {
+            if (ev.key === 'Enter') void createProgram(input.value.trim());
+            if (ev.key === 'Escape') row.remove();
+        });
+        row.appendChild(input);
+        row.appendChild(create);
+        panel.querySelector('[data-pybricks-git-panel-body]').appendChild(row);
+        input.focus();
+    }
+
+    async function createProgram(name) {
+        if (!isBareModuleName(name)) {
+            setStatus('Names use letters, digits and _ — like mission_03.');
+            return;
+        }
+        const path = name + '.py';
+        // Reserved names (config/teamSetup/setupTemplate/protected) plus every
+        // path currently in the editor. protectedPaths only holds files that
+        // exist; the manifest-named config/setup files are added explicitly so
+        // a collision is rejected even when they aren't in the editor yet.
+        const reserved = new Set(
+            [state.menuConfigPath, state.teamSetup, state.setupTemplate, ...state.protectedPaths]
+                .filter(Boolean),
+        );
+        if (state.allPaths.has(path) || reserved.has(path)) {
+            setStatus(`${path} already exists — pick another name.`);
+            return;
+        }
+        // Graft the team's setup chain onto the editor-authored empty-program
+        // scaffold so the kid gets a blockGlobalStart to program under. On any
+        // splice doubt, write nothing and surface the kid-facing reason.
+        const seed = newProgramContents(state.teamSetupRow.contents);
+        if (seed.error) {
+            setStatus(`Couldn't set up the program: ${seed.error}`);
+            return;
+        }
+        setStatus('Creating…');
+        try {
+            await pageRequest('upsert-files', { files: [{ path, contents: seed.contents }] });
+            await persist(true);
+            setStatus(`Created ${path} — reloading…`);
+            setTimeout(() => reload(), 800);
+        } catch (err) {
+            setStatus(`Couldn't create it: ${err.message}`);
+        }
     }
 
     // Section heading inside the panel body.
@@ -596,5 +700,12 @@ function makeMenuPanel(deps) {
         if (status) status.textContent = text;
     }
 
-    return { toggle, open, close, isOpen, addSlot };
+    // Open the panel (if needed) and drop straight into the new-program name
+    // row — the file-list context menu's "New program from team setup" entry.
+    async function newProgram() {
+        await open();
+        showNewProgramRow();
+    }
+
+    return { toggle, open, close, isOpen, addSlot, newProgram };
 }

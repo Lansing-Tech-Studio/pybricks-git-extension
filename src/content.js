@@ -28,6 +28,7 @@ function pageRequest(op, payload) {
 
 const menuPanel = makeMenuPanel({
     pageRequest,
+    serverRequest,
     storageGet: (key) =>
         new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
     storageSet: (obj) => new Promise((resolve) => chrome.storage.local.set(obj, () => resolve())),
@@ -39,6 +40,10 @@ const fileListWatcher = makeFileListWatcher({
     storageGet: (key) =>
         new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
     addSlot: (module, fn, blocks) => menuPanel.addSlot(module, fn, blocks),
+    onNewProgram: () =>
+        menuPanel.newProgram().catch((err) =>
+            console.error('[pybricks-git] new program failed:', err),
+        ),
 });
 fileListWatcher.start().catch((err) => console.warn('[pybricks-git] file-list watcher failed:', err));
 

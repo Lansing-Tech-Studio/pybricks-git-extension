@@ -5,14 +5,18 @@
 // Classic script — no exports. content.js calls makeFileListWatcher({...}).
 
 function makeFileListWatcher(deps) {
-    const { pageRequest, storageGet, addSlot } = deps;
+    const { pageRequest, storageGet, addSlot, onNewProgram } = deps;
 
     let protectedPaths = new Set();
+    // teamSetup file name from the manifest, or null. Null hides the
+    // "New program from team setup" context entry entirely.
+    let teamSetup = null;
     let debounceTimer = null;
 
     async function start() {
         const manifest = await storageGet('lastPullManifest');
         protectedPaths = new Set((manifest && manifest.protected) || []);
+        teamSetup = (manifest && manifest.teamSetup) || null;
         const observer = new MutationObserver(scheduleDecorate);
         observer.observe(document.body, { childList: true, subtree: true });
         scheduleDecorate();
@@ -132,7 +136,36 @@ function makeFileListWatcher(deps) {
         const file = listing.contents.find((c) => c.path === path);
         if (!file) return;
         const info = analyzeProgram(path, file.contents);
-        if (!info.module || protectedPaths.has(path)) return;
+        const isProtected = protectedPaths.has(path);
+
+        // Build the entry list first so an empty menu never renders. Add-to-menu
+        // entries only for eligible, non-protected programs; the New-program
+        // entry (below, before any protected early-return) is offered on EVERY
+        // row — it acts on the whole project — and is the ONLY entry on a
+        // protected row.
+        const entries = [];
+        if (info.module && !isProtected) {
+            entries.push({
+                item: info.module,
+                label: `Add ${info.module} to menu`,
+                run: () => void addSlot(info.module, null, false),
+            });
+            for (const method of info.methods) {
+                entries.push({
+                    item: `${info.module}.${method}`,
+                    label: `Add ${info.module}.${method}() to menu`,
+                    run: () => void addSlot(info.module, method, info.isBlocks),
+                });
+            }
+        }
+        if (teamSetup) {
+            entries.push({
+                item: 'new-program',
+                label: 'New program from team setup',
+                run: () => { if (onNewProgram) onNewProgram(); },
+            });
+        }
+        if (!entries.length) return;
 
         const menu = document.createElement('div');
         menu.dataset.pybricksGitContextMenu = '1';
@@ -168,13 +201,9 @@ function makeFileListWatcher(deps) {
             if (ev.key === 'Escape') dismiss();
         };
 
-        const entries = [{ label: `Add ${info.module} to menu`, fn: null }];
-        for (const method of info.methods) {
-            entries.push({ label: `Add ${info.module}.${method}() to menu`, fn: method });
-        }
         for (const entry of entries) {
             const btn = document.createElement('button');
-            btn.dataset.pybricksGitContextItem = entry.fn ? `${info.module}.${entry.fn}` : info.module;
+            btn.dataset.pybricksGitContextItem = entry.item;
             btn.textContent = entry.label;
             Object.assign(btn.style, {
                 background: 'none', color: '#ddd', border: 'none',
@@ -184,7 +213,7 @@ function makeFileListWatcher(deps) {
             btn.addEventListener('mouseleave', () => (btn.style.background = 'none'));
             btn.addEventListener('click', () => {
                 dismiss();
-                void addSlot(info.module, entry.fn, entry.fn ? info.isBlocks : false);
+                entry.run();
             });
             menu.appendChild(btn);
         }
