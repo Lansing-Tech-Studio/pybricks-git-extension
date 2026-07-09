@@ -650,7 +650,6 @@ async function main() {
         });
         const commitLabel = await poll(
             async () => {
-                const l = await buttonRect('✓').catch(() => null);
                 const raw = await evalIsolated(
                     `(() => { const b=[...document.querySelectorAll('button[data-pybricks-git]')].find(x=>['Committing','✓','no changes','error'].some(p=>x.textContent.trim().startsWith(p))); return b?b.textContent.trim():null; })()`,
                     false,
@@ -687,45 +686,49 @@ async function main() {
 
         // -- File-list badge (Task 6/7) -------------------------------------
         step(9, 'Protected badge on the menu.py file-list row (SKIP if unrendered)');
+        // SKIP is scoped STRICTLY to "the Explorer tree does not render in this
+        // headless environment" (per the task brief). Once the tree has rows, a
+        // missing badge is a real watcher regression and MUST fail the run, so
+        // the assert lives OUTSIDE this try/catch.
         let badgeChecked = false;
+        let treeReady = false;
         try {
             // The Explorer tree isn't mounted until its toolbar button is
             // clicked (file-list-dom.md §0). Open it, wait for the rows.
             const explorerPt = await rectOf('#pb-toolbar-explorer-button');
             if (!explorerPt) throw new Error('no #pb-toolbar-explorer-button');
             await trustedClick(explorerPt);
-            const treeReady = await poll(
+            treeReady = await poll(
                 async () =>
                     exists('[role="tree"][aria-label="Files"] li[role="treeitem"]'),
                 { timeout: 10000, what: 'Explorer file rows to render' },
-            ).catch(() => false);
-            if (!treeReady) {
-                log('SKIP: Explorer file list did not render in this environment');
-                log('      (badge path is covered by the Task 7 smoke)');
-            } else {
-                // The watcher badges protected rows on a 250ms-debounced
-                // decorate; poll for the badge inside the menu.py row.
-                const badged = await poll(
-                    () =>
-                        evalIsolated(
-                            `(() => {
-                              const rows = [...document.querySelectorAll('[role="tree"][aria-label="Files"] li[role="treeitem"]')];
-                              const row = rows.find(li => {
-                                const lbl = li.querySelector('span.bp5-tree-node-label');
-                                return lbl && lbl.textContent === 'menu.py';
-                              });
-                              return !!(row && row.querySelector('[data-pybricks-git-badge]'));
-                            })()`,
-                            false,
-                        ),
-                    { timeout: 10000, what: 'protected badge on menu.py row' },
-                ).catch(() => false);
-                assert(badged, 'menu.py file-list row carries [data-pybricks-git-badge]');
-                badgeChecked = true;
-            }
+            ).then(() => true, () => false);
         } catch (err) {
-            log('SKIP: file-list badge check skipped —', err.message);
+            log('SKIP: could not open the Explorer file list —', err.message);
+        }
+        if (!treeReady) {
+            log('SKIP: Explorer file list did not render in this environment');
             log('      (badge path is covered by the Task 7 smoke)');
+        } else {
+            // The watcher badges protected rows on a 250ms-debounced
+            // decorate; poll for the badge inside the menu.py row.
+            const badged = await poll(
+                () =>
+                    evalIsolated(
+                        `(() => {
+                          const rows = [...document.querySelectorAll('[role="tree"][aria-label="Files"] li[role="treeitem"]')];
+                          const row = rows.find(li => {
+                            const lbl = li.querySelector('span.bp5-tree-node-label');
+                            return lbl && lbl.textContent === 'menu.py';
+                          });
+                          return !!(row && row.querySelector('[data-pybricks-git-badge]'));
+                        })()`,
+                        false,
+                    ),
+                { timeout: 10000, what: 'protected badge on menu.py row' },
+            ).catch(() => false);
+            assert(badged, 'menu.py file-list row carries [data-pybricks-git-badge]');
+            badgeChecked = true;
         }
         evidence.badgeChecked = badgeChecked;
 
