@@ -157,7 +157,12 @@ const TEMPLATE_WITH_EXTRA = (() => {
     while (node.next && node.next.block) node = node.next.block;
     node.next = { block: armBlock };
     json.variables.push({ name: 'arm motor', id: 'arm-motor-new-id-000', type: 'Motor' });
-    return joinFile(json, python);
+    // The editor keeps the generated Python in sync with the blocks, so a real
+    // template with this extra block would also carry its setup line.
+    const syncedPython = python.replace(
+        'attachment = Motor(Port.D, Direction.CLOCKWISE)',
+        'attachment = Motor(Port.D, Direction.CLOCKWISE)\narm_motor = Motor(Port.C, Direction.CLOCKWISE)');
+    return joinFile(json, syncedPython);
 })();
 
 describe('spliceSetup', () => {
@@ -200,6 +205,46 @@ describe('spliceSetup', () => {
         assert.equal(r.error, null);
         const out = api.parseBlocksFile(r.contents);
         assert.ok(out.json.variables.some((v) => v.name === 'arm motor'));
+        // The template's setup section is copied verbatim, so the new device's
+        // setup line propagates into the spliced program's Python too.
+        assert.ok(out.python.includes('arm_motor = Motor(Port.C, Direction.CLOCKWISE)'));
+    });
+    test('template whose PYTHON lacks a setup marker -> skip with error', () => {
+        // Models a hand-mangled team setup file: line-1 JSON is fine (and
+        // differs from the target so the splice has work), but the Python body
+        // lost its "# Set up." marker — nothing to copy verbatim, so skip.
+        const { json, python } = splitFile(SETUP_ONLY);
+        json.blocks.blocks.find((b) => b.type === 'blockGlobalSetup')
+            .next.block.next.block.inputs.PORT.shadow.fields.NAME = 'A'; // F -> A
+        const markerless = joinFile(json, python.replace('# Set up.\n', ''));
+        const r = api.spliceSetup(DEMO, markerless);
+        assert.notEqual(r.error, null);
+        assert.equal(r.contents, null);
+    });
+    test('template chain block id colliding with a target body id -> skip', () => {
+        // Models an id clash between the template's chain and blocks elsewhere
+        // in the kid's program (rail: skip on doubt rather than minting ids).
+        // Surgery: give a template chain block the id of DEMO's blockPrint,
+        // and change a port so the signatures differ and the splice proceeds
+        // far enough to hit the collision check.
+        const { json, python } = splitFile(SETUP_ONLY);
+        const first = json.blocks.blocks.find((b) => b.type === 'blockGlobalSetup').next.block;
+        first.id = 'j,,T}?rBkaW$1v?olp4p'; // DEMO's blockPrint id (start chain)
+        first.next.block.inputs.PORT.shadow.fields.NAME = 'A'; // F -> A
+        const colliding = joinFile(json, python.replace('Port.F', 'Port.A'));
+        const r = api.spliceSetup(DEMO, colliding);
+        assert.notEqual(r.error, null);
+        assert.match(r.error, /id collision/);
+        assert.equal(r.contents, null);
+    });
+    test('target python with neither setup marker nor start marker -> skip', () => {
+        // Models a blocks file whose Python body was replaced by hand: valid
+        // line-1 JSON but no anchor line to insert the setup section at.
+        const { json } = splitFile(fixture('empty-program.py'));
+        const noAnchors = joinFile(json, 'x = 1\n');
+        const r = api.spliceSetup(noAnchors, SETUP_ONLY);
+        assert.notEqual(r.error, null);
+        assert.equal(r.contents, null);
     });
     test('renamed variable in target -> skip with kid-facing reason', () => {
         const target = DEMO.replaceAll('"name":"left wheel"', '"name":"port wheel"')
