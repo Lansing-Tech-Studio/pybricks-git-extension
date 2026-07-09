@@ -35,6 +35,9 @@ function parseBlocksFile(contents) {
 }
 
 function findSetupChain(json) {
+    if (!json || !json.blocks || !Array.isArray(json.blocks.blocks)) {
+        return { head: null, chain: null, error: 'unrecognized block file layout' };
+    }
     const heads = json.blocks.blocks.filter((b) => b && b.type === 'blockGlobalSetup');
     if (heads.length !== 1) {
         return { head: null, chain: null, error: heads.length === 0 ? 'no setup section found' : 'more than one setup section' };
@@ -52,12 +55,24 @@ function findSetupChain(json) {
     return { head, chain, error: null };
 }
 
+// Builds the id -> {name, type} lookup, skipping non-object entries (corrupt
+// files can carry e.g. null in variables[]; a chain ref pointing at one is
+// simply unresolvable, reported by the callers' existing dangling-ref error).
+function variablesById(variables) {
+    const byId = new Map();
+    for (const v of variables) {
+        if (!v || typeof v !== 'object') continue;
+        byId.set(v.id, { name: v.name, type: v.type });
+    }
+    return byId;
+}
+
 // Collects every variable id referenced in the chain: the set blocks'
 // fields.VAR.id and any nested fields.VAR.id in shadows/blocks (a
 // variables_get_* shadow carries {id, name, type} but the variables array is
 // the source of truth for resolution).
 function chainVariableRefs(chain, variables) {
-    const byId = new Map(variables.map((v) => [v.id, { name: v.name, type: v.type }]));
+    const byId = variablesById(variables);
     const refs = new Map();
     let error = null;
     (function walk(node) {
@@ -79,7 +94,7 @@ function setupSignature(contents) {
     if (parsed.error) return { signature: null, error: parsed.error };
     const found = findSetupChain(parsed.json);
     if (found.error) return { signature: null, error: found.error };
-    const byId = new Map(parsed.json.variables.map((v) => [v.id, { name: v.name, type: v.type }]));
+    const byId = variablesById(parsed.json.variables);
     let danglingRef = false;
     const canon = (function clone(node) {
         if (Array.isArray(node)) return node.map(clone);

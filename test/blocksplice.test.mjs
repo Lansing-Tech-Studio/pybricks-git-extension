@@ -45,6 +45,10 @@ describe('findSetupChain', () => {
         const r = api.findSetupChain({ blocks: { blocks: [] }, variables: [] });
         assert.notEqual(r.error, null);
     });
+    test('null / shapeless json -> error, never throws', () => {
+        assert.notEqual(api.findSetupChain(null).error, null);
+        assert.notEqual(api.findSetupChain({}).error, null);
+    });
     test('non-variables_set block in chain -> error (unrecognized shape)', () => {
         const { json } = api.parseBlocksFile(DEMO);
         const chainCopy = structuredClone(json);
@@ -68,27 +72,21 @@ describe('chainVariableRefs', () => {
         const { chain } = api.findSetupChain(json);
         assert.notEqual(api.chainVariableRefs(chain, []).error, null);
     });
+    test('non-object variables entries are skipped, never throw', () => {
+        const { json } = api.parseBlocksFile(DEMO);
+        const { chain } = api.findSetupChain(json);
+        const r = api.chainVariableRefs(chain, [null, ...json.variables]);
+        assert.equal(r.error, null);
+        // a referenced entry replaced by null -> unresolvable -> error, not throw
+        const holed = json.variables.map((v) => (v.name === 'prime hub' ? null : v));
+        assert.notEqual(api.chainVariableRefs(chain, holed).error, null);
+    });
 });
 
 describe('setupSignature', () => {
-    test('identical for a file and itself; stable across id churn', () => {
+    test('identical for a file and itself', () => {
         const a = api.setupSignature(DEMO);
         assert.equal(a.error, null);
-        // re-id every block: signature must not change
-        const { json, python } = api.parseBlocksFile(DEMO);
-        const churned = structuredClone(json);
-        let n = 0;
-        (function reId(o) {
-            if (o && typeof o === 'object') {
-                if (typeof o.id === 'string' && !('name' in o)) o.id = `reid-${n++}`.padEnd(20, '_');
-                for (const v of Object.values(o)) reId(v);
-            }
-        })(churned.blocks.blocks[0]);
-        // NOTE: fields.VAR objects keep their ids in this churn only where a name
-        // is present; setupSignature must resolve VAR ids via the variables array,
-        // so ALSO remap the variables array ids consistently for a fair test —
-        // simpler: assert signature(DEMO) !== signature(SETUP_ONLY-with-a-port-changed)
-        // and signature(DEMO) === signature(DEMO).
         assert.equal(api.setupSignature(DEMO).signature, a.signature);
     });
     test('differs when a port changes', () => {
@@ -100,5 +98,21 @@ describe('setupSignature', () => {
     });
     test('non-blocks file -> error', () => {
         assert.notEqual(api.setupSignature('x = 1\n').error, null);
+    });
+    test('null variables entries -> error only when referenced, never throws', () => {
+        // Rebuild DEMO's line 1 with a null variable entry via JSON surgery.
+        const withNullAt = (index) => {
+            const nl = DEMO.indexOf('\n');
+            const sentinel = '# pybricks blocks file:';
+            const json = JSON.parse(DEMO.slice(sentinel.length, nl));
+            json.variables[index] = null;
+            return sentinel + JSON.stringify(json) + DEMO.slice(nl);
+        };
+        // variables[0] is a ColorDef the setup chain never references: still fine.
+        const unreferenced = api.setupSignature(withNullAt(0));
+        assert.equal(unreferenced.error, null);
+        assert.equal(unreferenced.signature, api.setupSignature(DEMO).signature);
+        // variables[10] is "prime hub", referenced by the chain: error, not throw.
+        assert.notEqual(api.setupSignature(withNullAt(10)).error, null);
     });
 });
