@@ -1,0 +1,50 @@
+name: Prove CWS auth
+
+# Throwaway. Deleted once it has answered two questions:
+#   1. Does a WIF-minted token get accepted by the Chrome Web Store v2 API?
+#   2. What shape is the response body?
+#
+# See docs/superpowers/plans/2026-07-25-release-automation.md, Task 3.
+
+on: workflow_dispatch
+
+permissions:
+  contents: read
+  id-token: write # required to mint the GitHub OIDC token for WIF
+
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    steps:
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+
+      - name: Read the item
+        env:
+          TOKEN: ${{ steps.auth.outputs.access_token }}
+          PUB: ${{ vars.CWS_PUBLISHER_ID }}
+          EXT: ${{ vars.CWS_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o response.json -w '%{http_code}' \
+            -H "Authorization: Bearer $TOKEN" \
+            "https://chromewebstore.googleapis.com/v2/publishers/$PUB/items/$EXT")
+
+          echo "HTTP $code"
+          jq . response.json || cat response.json
+
+          # Distinguish the three outcomes that matter:
+          #   200     -> auth works and the path is right
+          #   404     -> auth works, this read path is wrong (harmless here)
+          #   401/403 -> auth REJECTED; WIF is not viable, fall back to a JSON key
+          case "$code" in
+            200) echo "::notice::WIF token accepted" ;;
+            404) echo "::notice::WIF token accepted (404 = wrong read path, auth fine)" ;;
+            401|403) echo "::error::WIF token REJECTED — use the JSON-key fallback"; exit 1 ;;
+            *) echo "::error::unexpected HTTP $code"; exit 1 ;;
+          esac
