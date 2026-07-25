@@ -1,0 +1,23 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # ubuntu-latest already ships git >= 2.28 and unzip, which the suite
+      # requires (test/git-http-server.mjs seeds repos with `git init -b main`,
+      # and test/pack.test.mjs validates the zip with the real unzip binary).
+      - run: npm ci
+      - run: npm test

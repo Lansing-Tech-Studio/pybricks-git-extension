@@ -484,7 +484,10 @@ jobs:
       - run: npm test
 
       - id: bump
-        run: echo "version=$(node scripts/bump.mjs ${{ inputs.bump }})" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          version=$(node scripts/bump.mjs ${{ inputs.bump }})
+          echo "version=$version" >> "$GITHUB_OUTPUT"
 
       - run: npm run pack
 
