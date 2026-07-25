@@ -47,18 +47,142 @@
 
 ## Prerequisites (Brendon, manual — blocks Task 3)
 
-Not code. These must be done before Task 3 can run:
+Not code. All of this must be done before Task 3 can run. Nothing here creates a
+long-lived credential — there is no key file to download, store, or rotate.
 
-1. Google Cloud project with the **Chrome Web Store API** enabled.
-2. Create a service account (no key file — WIF needs none).
-3. Chrome Web Store Developer Dashboard → **Account** → add the service account email. Only **one** service account per publisher is permitted.
-4. Create a Workload Identity Pool + GitHub OIDC provider, with the attribute condition restricted to the `Lansing-Tech-Studio/pybricks-git-extension` repository. **An unrestricted provider would let any GitHub repository impersonate this service account.**
-5. Grant the WIF principal `roles/iam.serviceAccountTokenCreator` on the service account.
-6. Set the four repo variables (Settings → Secrets and variables → Actions → **Variables** tab):
-   - `WIF_PROVIDER` — full provider resource name, `projects/…/locations/global/workloadIdentityPools/…/providers/…`
-   - `WIF_SERVICE_ACCOUNT` — service account email
-   - `CWS_EXTENSION_ID` — from the dashboard URL
-   - `CWS_PUBLISHER_ID` — Dashboard → Publisher → Settings
+Requires the `gcloud` CLI. On WSL/Debian/Ubuntu, if you don't have it:
+`sudo snap install google-cloud-cli --classic`, or follow
+https://cloud.google.com/sdk/docs/install.
+
+### Step 0 — sign in and set your shell variables
+
+`gcloud auth login` opens a browser and must be run by you interactively.
+
+```bash
+gcloud auth login
+
+# Pick any globally-unique project id. It is never user-visible.
+export PROJECT_ID=pybricks-git-release
+export SA_NAME=cws-publisher
+export POOL_ID=github
+export PROVIDER_ID=pybricks-git-extension
+export REPO=Lansing-Tech-Studio/pybricks-git-extension
+```
+
+### Step 1 — create the project and enable the APIs
+
+Skip the create if you're reusing an existing project.
+
+```bash
+gcloud projects create "$PROJECT_ID" --name="Pybricks Git Release"
+gcloud config set project "$PROJECT_ID"
+
+gcloud services enable \
+  chromewebstore.googleapis.com \
+  iamcredentials.googleapis.com \
+  sts.googleapis.com \
+  iam.googleapis.com
+```
+
+`chromewebstore.googleapis.com` is the store API itself; the other three are what
+Workload Identity Federation runs on (token exchange and impersonation). Enabling
+takes a minute or two to propagate.
+
+### Step 2 — create the service account
+
+```bash
+gcloud iam service-accounts create "$SA_NAME" \
+  --display-name="Chrome Web Store publisher (GitHub Actions)"
+
+export SA_EMAIL="$SA_NAME@$PROJECT_ID.iam.gserviceaccount.com"
+echo "$SA_EMAIL"
+```
+
+Per Google's docs: *"You don't need to add any permissions to the service account
+at this stage."* It needs no project-level IAM roles — its authority comes from
+being linked in the Chrome Web Store dashboard (Step 5).
+
+### Step 3 — create the Workload Identity Pool and GitHub provider
+
+```bash
+gcloud iam workload-identity-pools create "$POOL_ID" \
+  --location=global \
+  --display-name="GitHub Actions"
+
+gcloud iam workload-identity-pools providers create-oidc "$PROVIDER_ID" \
+  --location=global \
+  --workload-identity-pool="$POOL_ID" \
+  --display-name="pybricks-git-extension" \
+  --issuer-uri="https://token.actions.githubusercontent.com" \
+  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository" \
+  --attribute-condition="assertion.repository == '$REPO'"
+```
+
+**The `--attribute-condition` is the security boundary.** Without it, *any* GitHub
+repository on the internet could mint a token for this service account and publish
+to your store listing. It must name this exact repository. (Google's own example
+uses `repository_owner`, which trusts the whole org — narrower is correct here.)
+
+### Step 4 — let the repo impersonate the service account
+
+```bash
+export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
+
+gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+  --role=roles/iam.workloadIdentityUser \
+  --member="principalSet://iam.googleapis.com/projects/$PROJECT_NUMBER/locations/global/workloadIdentityPools/$POOL_ID/attribute.repository/$REPO"
+```
+
+**The role is `roles/iam.workloadIdentityUser`, not `serviceAccountTokenCreator`.**
+`workloadIdentityUser` carries `iam.serviceAccounts.getAccessToken`, which is what
+minting the token needs. `serviceAccountTokenCreator` shows up in the Chrome Web
+Store docs only for their local-gcloud path, and in `google-github-actions/auth`
+only for Domain-Wide Delegation — neither applies. Granting only that one 403s.
+
+Note the member is a `principalSet://` (a *set* of identities matching the
+attribute), not a `serviceAccount:`. `PROJECT_NUMBER` is required here —
+`PROJECT_ID` will not work.
+
+### Step 5 — link the service account in the Chrome Web Store dashboard
+
+Manual, in the browser. This is the step that grants actual publishing authority.
+
+1. Open the [Developer Dashboard](https://chrome.google.com/webstore/developer/dashboard).
+2. Go to the **Account** section.
+3. Add the service account email printed in Step 2.
+
+**Only one service account per publisher is permitted** — if one is already linked,
+adding this replaces it. You must be an owner of the publisher account to do this.
+
+While you're there, collect:
+- **Publisher ID** — Dashboard → **Publisher** → **Settings**
+- **Extension ID** — the long id in the dashboard URL for the item
+
+### Step 6 — set the four repo variables
+
+These are **variables, not secrets** — none is sensitive. A provider resource name
+and a service account email grant nothing without the OIDC trust relationship, and
+the extension/publisher ids are public.
+
+```bash
+export WIF_PROVIDER=$(gcloud iam workload-identity-pools providers describe "$PROVIDER_ID" \
+  --location=global --workload-identity-pool="$POOL_ID" --format='value(name)')
+echo "$WIF_PROVIDER"   # projects/<number>/locations/global/workloadIdentityPools/github/providers/pybricks-git-extension
+
+gh variable set WIF_PROVIDER        --body "$WIF_PROVIDER"
+gh variable set WIF_SERVICE_ACCOUNT --body "$SA_EMAIL"
+gh variable set CWS_EXTENSION_ID    --body "<extension id from Step 5>"
+gh variable set CWS_PUBLISHER_ID    --body "<publisher id from Step 5>"
+
+gh variable list
+```
+
+(Or via the web UI: Settings → Secrets and variables → Actions → **Variables** tab.)
+
+### Verifying
+
+Task 3 is the verification — it mints a token and makes a read-only call. Do not
+hand-test by downloading a key; that defeats the point of the keyless setup.
 
 ---
 

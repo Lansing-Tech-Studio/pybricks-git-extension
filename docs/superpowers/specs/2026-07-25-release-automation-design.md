@@ -56,7 +56,9 @@ More one-time setup, zero ongoing upkeep. The more secure option is here also th
 
 ### Why WIF should work, and how we confirm it
 
-WIF is not named in the Chrome Web Store documentation. The reasoning that it works: WIF *is* impersonation. GitHub's OIDC token → WIF pool → `roles/iam.serviceAccountTokenCreator` on the linked service account → a short-lived access token scoped to `https://www.googleapis.com/auth/chromewebstore`. The Chrome Web Store receives an ordinary service-account access token and has no way to distinguish how it was minted.
+WIF is not named in the Chrome Web Store documentation. The reasoning that it works: WIF *is* impersonation. GitHub's OIDC token → WIF pool → `roles/iam.workloadIdentityUser` on the linked service account → a short-lived access token scoped to `https://www.googleapis.com/auth/chromewebstore`. The Chrome Web Store receives an ordinary service-account access token and has no way to distinguish how it was minted.
+
+**On the role:** `roles/iam.workloadIdentityUser` is the correct and sufficient binding — it carries `iam.serviceAccounts.getAccessToken`, which is exactly what minting the token requires. `roles/iam.serviceAccountTokenCreator` appears in the Chrome Web Store docs only for their *local gcloud impersonation* path (a human at a terminal), and in `google-github-actions/auth` only for Domain-Wide Delegation, which this is not. Granting only `serviceAccountTokenCreator` to the WIF principal fails with a 403.
 
 **This is inference, not vendor-confirmed.** The implementation plan therefore opens with a throwaway proving step (see Phase 0) before any release machinery depends on it.
 
@@ -164,7 +166,7 @@ Not code. Ordered:
 2. Create a service account. No key is generated under the WIF path.
 3. Chrome Web Store Developer Dashboard → **Account** → add the service account email. (One per publisher.)
 4. Create a Workload Identity Pool and a GitHub OIDC provider, with the attribute condition restricted to the `Lansing-Tech-Studio/pybricks-git-extension` repository — an unrestricted provider would let any GitHub repo impersonate the account.
-5. Grant the WIF principal `roles/iam.serviceAccountTokenCreator` on the service account.
+5. Grant the WIF principal `roles/iam.workloadIdentityUser` on the service account (NOT `serviceAccountTokenCreator` — see "On the role" above).
 6. Set the four repo variables listed above.
 
 ## First release
