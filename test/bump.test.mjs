@@ -51,6 +51,18 @@ test('bumpManifest does not mistake manifest_version for version', () => {
   assert.match(text, /"version": "1\.0\.0"/);
 });
 
-test('bumpManifest throws when there is no version field to replace', () => {
+test('bumpManifest throws (via bumpVersion) when there is no top-level version to read', () => {
+  // No "version" key at all, so JSON.parse(raw).version is undefined before
+  // the replace guard even runs — this exercises bumpVersion's own check,
+  // not the post-replace verification below.
   assert.throws(() => bumpManifest('{"manifest_version": 3}', 'patch'), /manifest version/);
+});
+
+test('bumpManifest throws when the replace lands on the wrong "version" key', () => {
+  // A nested "version" key sorts earlier in the text than the top-level one
+  // the regex is meant to target. The old guard (text === raw) couldn't see
+  // this: the nested key WAS replaced, so text changed and the check passed
+  // silently even though the top-level version was never touched.
+  const raw = '{ "some_block": { "version": "9.9.9" }, "version": "0.1.0" }';
+  assert.throws(() => bumpManifest(raw, 'patch'), /manifest version/);
 });

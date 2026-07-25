@@ -30,12 +30,15 @@ export function bumpVersion(version, type) {
 // Targeted replace rather than JSON.stringify: the manifest's compact arrays
 // ("permissions": ["storage"]) are hand-formatted, and restringifying would
 // expand every one of them into a noisy multi-line diff on each release.
-// The pattern cannot match "manifest_version" — that key has no `"version"`
-// substring preceded by a quote, and its value is unquoted anyway.
+// The regex targets the first textual "version" match, which is positional,
+// not semantic (the top-level `version` field the caller asked to bump) — so
+// the result is verified by re-parsing rather than by comparing text to raw.
+// That catches a nested "version" key stealing the match (top level would
+// then silently keep its old value) as well as no match at all.
 export function bumpManifest(raw, type) {
   const version = bumpVersion(JSON.parse(raw).version, type);
   const text = raw.replace(/("version"\s*:\s*)"[^"]*"/, `$1"${version}"`);
-  if (text === raw) {
+  if (JSON.parse(text).version !== version) {
     throw new Error('manifest version field not found — nothing was replaced');
   }
   return { text, version };
