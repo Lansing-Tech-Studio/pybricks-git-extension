@@ -114,6 +114,32 @@ team-coordination work shipped behind it.
   link. Switch to Public later if wider discovery is wanted.
 - **Regions:** all regions (default).
 
+## Test instructions (500-char limit, confidential to the review team)
+
+Deliberately provides no credentials: any GitHub account exercises the full
+feature set, so handing over a throwaway account's password would add risk for
+no benefit. "No test account needed" also answers the question behind the field
+— nothing is gated behind a login *we* control.
+
+Scoped to the version-control path only. The coach features need a configured
+`.pybricks-git.json`, and the setup-propagation ones cannot activate until
+`robot_setup_template.py` exists in the starter repo — sending a reviewer down a
+path that dead-ends would cost more than the extra coverage is worth. Revisit
+once that template is authored.
+
+> No test account needed - any GitHub account works.
+>
+> 1. Fork github.com/Lansing-Tech-Studio/pybricks-spike-prime-starter
+> 2. Click the extension icon, choose "Sign in with GitHub", and enter the
+>    device code shown. (Or paste a fine-grained PAT under Advanced.)
+> 3. Enter your fork's URL, branch "main", and Save.
+> 4. Open code.pybricks.com - Pull and Commit appear in the toolbar.
+> 5. Pull loads the repo's .py programs into the editor. Edit one, then Commit
+>    to push it back to your fork.
+
+(483 characters. Plain hyphens, not em dashes — the counter is unforgiving and
+some dashboard fields mangle non-ASCII.)
+
 ## Reviewer notes (the "additional details" box on submit)
 
 > This extension only operates on code.pybricks.com (an online editor for
