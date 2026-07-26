@@ -10,7 +10,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, copyFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -19,14 +19,24 @@ test('CLI prints only the new version to stdout', () => {
   try {
     mkdirSync(join(dir, 'scripts'));
     copyFileSync(new URL('../scripts/bump.mjs', import.meta.url), join(dir, 'scripts/bump.mjs'));
-    copyFileSync(new URL('../manifest.json', import.meta.url), join(dir, 'manifest.json'));
+
+    // A fixture with a KNOWN version, deliberately not the repo's real
+    // manifest.json. Copying the real one couples this assertion to whatever
+    // version we last released, so the test breaks after every release — which
+    // it did, the first time, when 1.0.0 shipped. Formatting preservation
+    // against the real manifest is bump.test.mjs's job; this test pins only the
+    // stdout contract, which needs a fixed input to assert against.
+    writeFileSync(
+      join(dir, 'manifest.json'),
+      '{\n  "manifest_version": 3,\n  "version": "4.5.6"\n}\n',
+    );
 
     const result = spawnSync(process.execPath, [join(dir, 'scripts/bump.mjs'), 'patch'], {
       encoding: 'utf8',
     });
 
     assert.equal(result.status, 0, result.stderr);
-    assert.equal(result.stdout, '0.1.1\n');
+    assert.equal(result.stdout, '4.5.7\n');
     assert.equal(result.stderr, '');
   } finally {
     rmSync(dir, { recursive: true, force: true });
