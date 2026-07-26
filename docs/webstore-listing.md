@@ -1,8 +1,15 @@
 # Chrome Web Store submission — copy-paste sheet
 
-Everything the developer dashboard asks for, pre-written. Upload the zip from
-`npm run pack` (it strips the `http://127.0.0.1/*` E2E grant — never upload a
-zip of the repo root).
+Everything the developer dashboard asks for, pre-written.
+
+**The package is uploaded and published by the Release workflow** (Actions →
+Release), not by hand — see CLAUDE.md's Releasing section. This sheet covers the
+*listing* fields, which the API does not manage: description, screenshots,
+privacy answers, and distribution. Those still change through the dashboard.
+
+**Keep this in sync with what ships.** The description below went stale once
+already, describing only the version-control features while three phases of
+team-coordination work shipped behind it.
 
 ## Store listing tab
 
@@ -13,8 +20,8 @@ zip of the repo root).
 - **Language:** English (United States)
 - **Detailed description:**
 
-  > Pybricks Git adds Git version control to code.pybricks.com, the online
-  > editor for LEGO® Powered Up hubs.
+  > Pybricks Git adds Git version control — and team coordination tools — to
+  > code.pybricks.com, the online editor for LEGO® Powered Up hubs.
   >
   > Robotics teams write their programs in the Pybricks editor, but the
   > programs live only in that browser's local storage — one cleared profile
@@ -22,17 +29,34 @@ zip of the repo root).
   > and Commit buttons to the editor toolbar so the team's programs are backed
   > up to a GitHub repository the team controls, with full history.
   >
+  > VERSION CONTROL
   > • Sign in with GitHub (no tokens to manage), or paste a fine-grained
   >   personal access token for private repositories
   > • Commit all programs with one click; pull the latest from GitHub on any
   >   machine
   > • Block programs round-trip byte-for-byte — workspace layout, scroll
   >   position, and file identity are preserved
+  >
+  > FOR COACHES AND MENTORS
+  > • Protected files — mark shared starter code in your template repository so
+  >   a team's commit can never overwrite it. Protected files are badged in the
+  >   editor's file list, and the extension reports anything it skipped.
+  > • Hub menu manager — build the hub's on-device program menu from a
+  >   drag-and-drop panel instead of hand-writing Python, including each slot's
+  >   number, letter, or 5×5 light-matrix image.
+  > • Shared robot setup — push one robot configuration (hub, motors, drive
+  >   base) into every mission program at once, so students never hand-copy
+  >   setup blocks. The extension commits a snapshot before it changes
+  >   anything, and skips any program whose devices don't match rather than
+  >   guessing.
+  >
   > • Everything runs in your browser: no account with us, no server, no
   >   telemetry. The extension talks only to GitHub.
   >
-  > Requires a GitHub repository (a fork per team works well). Not affiliated
-  > with Pybricks or LEGO.
+  > Requires a GitHub repository (a fork per team works well). The coach
+  > features read an optional configuration file from the repository; teams
+  > without one get the version-control features and nothing extra. Not
+  > affiliated with Pybricks or LEGO.
 
 - **Store icon:** 128×128 — upload `icons/icon128.png`
 - **Screenshots:** at least one, 1280×800 (see the screenshot walkthrough in
