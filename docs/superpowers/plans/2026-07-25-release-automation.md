@@ -18,7 +18,9 @@
   - Upload: `POST https://chromewebstore.googleapis.com/upload/v2/publishers/$PUB/items/$EXT:upload`
   - Publish: `POST https://chromewebstore.googleapis.com/v2/publishers/$PUB/items/$EXT:publish`
 - **OAuth scope:** `https://www.googleapis.com/auth/chromewebstore`
-- **Never trust `curl`'s exit code alone** on Chrome Web Store calls. The v1 upload endpoint returns HTTP 200 with a failure body (`{"uploadState": "FAILURE", "itemError": [...]}`). Every store call parses the response body and fails explicitly.
+- **Never trust `curl`'s exit code alone** on Chrome Web Store calls. Every store call must require a parseable JSON body (an HTML body means the request never reached the API and says nothing about auth), then read the state field. Values confirmed from the v2 discovery document: `uploadState` ∈ `SUCCEEDED|IN_PROGRESS|FAILED|NOT_FOUND|UPLOAD_STATE_UNSPECIFIED` (**`SUCCEEDED`, not `SUCCESS`**); `PublishItemResponse.state` ∈ `PENDING_REVIEW|STAGED|PUBLISHED|PUBLISHED_TO_TESTERS|REJECTED|CANCELLED|ITEM_STATE_UNSPECIFIED` (field is **`state`, not `status`**).
+- **The read method is `:fetchStatus`.** `GET v2/publishers/$PUB/items/$EXT:fetchStatus` — there is no plain `GET` on an item.
+- **`google-github-actions/auth` is at `v3`**, pinned SHA `7c6bc770dae815cd3e89ee6cdf493a5fab2cc093`.
 - **Publish before tag.** The store call runs *before* the commit/tag/push. A missing release record is recoverable; a false one is not.
 - **Pin `google-github-actions/auth` to a commit SHA**, not a tag. It handles the publishing credential.
 - **No new npm dependencies.** `package.json` is tooling-only and must stay that way.
@@ -643,12 +645,25 @@ jobs:
           jq . upload.json || cat upload.json
           test "$code" = "200" || { echo "::error::upload returned HTTP $code"; exit 1; }
 
-          # HTTP 200 is not sufficient: v1 returned 200 with a failure body, and
-          # this check is correct whether or not v2 kept that behavior.
-          if jq -e '(.uploadState? == "FAILURE") or (.error? != null) or ((.itemError? // [] | length) > 0)' upload.json >/dev/null; then
-            echo "::error::upload rejected by the store"
-            exit 1
-          fi
+          # HTTP 200 is not sufficient — the body carries the real verdict.
+          # Enum confirmed from the v2 discovery document (Task 3):
+          #   SUCCEEDED | IN_PROGRESS | FAILED | NOT_FOUND | UPLOAD_STATE_UNSPECIFIED
+          # NOTE: it is SUCCEEDED/FAILED, NOT SUCCESS/FAILURE.
+          state=$(jq -r '.uploadState // "MISSING"' upload.json)
+          case "$state" in
+            SUCCEEDED) ;;
+            IN_PROGRESS)
+              # ponytail: no polling loop until we see this happen for real.
+              # If it does, poll GET .../items/$EXT:fetchStatus and read
+              # .lastAsyncUploadState until it leaves IN_PROGRESS.
+              echo "::error::upload is still processing (IN_PROGRESS). Re-run, or add fetchStatus polling."
+              exit 1
+              ;;
+            *)
+              echo "::error::upload rejected by the store (uploadState=$state)"
+              exit 1
+              ;;
+          esac
 
       - name: Publish
         env:
@@ -665,10 +680,19 @@ jobs:
           jq . publish.json || cat publish.json
           test "$code" = "200" || { echo "::error::publish returned HTTP $code"; exit 1; }
 
-          if jq -e '(.error? != null) or ((.itemError? // [] | length) > 0)' publish.json >/dev/null; then
-            echo "::error::publish rejected by the store"
-            exit 1
-          fi
+          # PublishItemResponse carries `state` (NOT `status`), plus `warningInfo`.
+          # Enum confirmed from the v2 discovery document (Task 3):
+          #   PENDING_REVIEW | STAGED | PUBLISHED | PUBLISHED_TO_TESTERS
+          #   | REJECTED | CANCELLED | ITEM_STATE_UNSPECIFIED
+          # PENDING_REVIEW is the expected happy path — publishing queues for review.
+          state=$(jq -r '.state // "MISSING"' publish.json)
+          case "$state" in
+            PENDING_REVIEW|STAGED|PUBLISHED) echo "::notice::publish accepted (state=$state)" ;;
+            *) echo "::error::publish rejected by the store (state=$state)"; exit 1 ;;
+          esac
+
+          jq -e '.warningInfo' publish.json >/dev/null 2>&1 \
+            && echo "::warning::store returned warnings: $(jq -c .warningInfo publish.json)" || true
 
       # Only now record it. gh release create makes the tag itself, and the
       # bump commit is already pushed, so it tags the right commit.

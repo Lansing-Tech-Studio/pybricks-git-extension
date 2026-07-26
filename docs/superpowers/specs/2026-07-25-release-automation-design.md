@@ -60,7 +60,9 @@ WIF is not named in the Chrome Web Store documentation. The reasoning that it wo
 
 **On the role:** `roles/iam.workloadIdentityUser` is the correct and sufficient binding — it carries `iam.serviceAccounts.getAccessToken`, which is exactly what minting the token requires. `roles/iam.serviceAccountTokenCreator` appears in the Chrome Web Store docs only for their *local gcloud impersonation* path (a human at a terminal), and in `google-github-actions/auth` only for Domain-Wide Delegation, which this is not. Granting only `serviceAccountTokenCreator` to the WIF principal fails with a 403.
 
-**This is inference, not vendor-confirmed.** The implementation plan therefore opens with a throwaway proving step (see Phase 0) before any release machinery depends on it.
+**CONFIRMED 2026-07-25 (Task 3).** This started as inference, and the plan opened with a throwaway proving step before anything depended on it. That probe now returns **HTTP 200** from `publishers.items.fetchStatus` using a WIF-minted, `chromewebstore`-scoped token — the full chain (GitHub OIDC → WIF pool → service-account impersonation → v2 API) works against the live listing. The JSON-key fallback is not needed.
+
+Two corrections the probe forced, both recorded below: the IAM role is `workloadIdentityUser`, and the first probe's HTML 404 revealed there is no plain `GET` on an item.
 
 ### Fallback
 
@@ -150,7 +152,23 @@ The one awkward case is publish-succeeds-then-push-fails followed by a naive re-
 
 `curl` exits 0 on that, so a naive step goes green on a failed upload — the single most likely way this automation breaks silently. Both the upload and publish steps must parse the response body with `jq` and fail explicitly on any non-success state, never trusting the exit code alone.
 
-Whether v2 preserves this 200-on-failure behavior is **unconfirmed** — as a properly-shaped Google API it may return real HTTP error codes. The explicit body check is kept regardless, since it is correct under either behavior. The actual v2 response shape must be captured during Phase 0 and the check written against it.
+**CONFIRMED 2026-07-25 (Task 3)**, from the authoritative v2 discovery document at
+`https://chromewebstore.googleapis.com/$discovery/rest?version=v2` — the reference to consult before touching these calls again:
+
+| Method | Verb + path |
+|---|---|
+| read | `GET v2/{+name}:fetchStatus` — there is **no plain `GET`** on an item; without `:fetchStatus` you get an HTML 404 |
+| upload | `POST /upload/v2/{+name}:upload` |
+| publish | `POST v2/{+name}:publish` |
+
+`{+name}` is `publishers/{publisher}/items/{item}`. Scopes: `.../auth/chromewebstore` and `.../auth/chromewebstore.readonly`.
+
+v2 **does** keep a state field in the body, so the explicit body check stays. The exact values matter:
+
+- `UploadItemPackageResponse.uploadState` ∈ `SUCCEEDED | IN_PROGRESS | FAILED | NOT_FOUND | UPLOAD_STATE_UNSPECIFIED`. **It is `SUCCEEDED`/`FAILED`, not `SUCCESS`/`FAILURE`** — this spec's earlier draft had the v1 strings, which would have failed every good upload.
+- `PublishItemResponse.state` ∈ `PENDING_REVIEW | STAGED | PUBLISHED | PUBLISHED_TO_TESTERS | REJECTED | CANCELLED | ITEM_STATE_UNSPECIFIED`. The field is **`state`, not `status`**, and the happy path is `PENDING_REVIEW`. There is also a `warningInfo` field worth surfacing.
+
+An HTML (non-JSON) body means the request never reached the API at all and says nothing about auth — an unauthenticated request to a bad path returns the same page. Any store-call check must therefore require a parseable JSON body before interpreting a status code.
 
 ## Testing
 
