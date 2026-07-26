@@ -151,13 +151,45 @@ Protected files and the team-setup/template files themselves are **never** splic
 npm install   # once, pulls dev deps into gitignored node_modules
 npm test
 
-# Build the Chrome Web Store zip → dist/pybricks-git-v<version>.zip.
+# Build the Chrome Web Store zip locally → dist/pybricks-git-v<version>.zip.
 # Packages manifest.json + src/ + vendor/ + icons/ only, with the
 # http://127.0.0.1/* E2E grant stripped from host_permissions.
+# Releases do this in CI — this is for inspecting the package by hand.
 npm run pack
+
+# Bump the version locally (CI does this during a release; rarely needed by hand).
+node scripts/bump.mjs <major|minor|patch>
 ```
 
 There is no build step and nothing to run alongside the extension — the git work happens in the service worker.
+
+## Releasing
+
+Releases are a one-click GitHub Actions run — **do not hand-edit `manifest.json`
+or upload through the dashboard.**
+
+Actions → **Release** → *Run workflow* → pick `patch` / `minor` / `major`.
+
+The workflow bumps `manifest.json`, runs the full test suite as a gate, packs the
+zip, publishes to the Chrome Web Store **v2** API, then commits the bump and cuts a
+GitHub Release with the zip attached. It authenticates keyless via Workload
+Identity Federation — there are no long-lived store credentials to rotate.
+
+**Publish happens before the commit and tag, deliberately.** If the store call
+fails, nothing has been persisted and the run can simply be repeated. The reverse
+order would leave the repo claiming a release that never shipped.
+
+Configuration lives in repo *variables* (not secrets — none are sensitive under
+WIF): `WIF_PROVIDER`, `WIF_SERVICE_ACCOUNT`, `CWS_EXTENSION_ID`, `CWS_PUBLISHER_ID`.
+
+**Before changing any store call, read the v2 discovery document**
+(`https://chromewebstore.googleapis.com/$discovery/rest?version=v2`) — it is the
+authoritative source for paths and enums, and two of its details are easy to get
+wrong: the read method is `:fetchStatus` (there is no plain `GET` on an item), and
+the upload enum is `SUCCEEDED`/`FAILED`, not v1's `SUCCESS`/`FAILURE`. **The v1 API
+sunsets 2026-10-15.**
+
+Design: `docs/superpowers/specs/2026-07-25-release-automation-design.md`.
 
 ## Tests
 
@@ -175,7 +207,7 @@ There is no build step and nothing to run alongside the extension — the git wo
 
 - `code.pybricks.com` sets **no CSP**, so script/style/eval restrictions are not a constraint. COEP/COOP are present (for `SharedArrayBuffer` / `crossOriginIsolated`, which Pyodide needs) but they don't bind extension behavior — the git traffic goes out of the service worker to `github.com`, not through the page context, so there is no cross-origin-isolation constraint to satisfy.
 - The extension is plain JS, no build step. If you add a bundler, output to `dist/` (gitignored) and update `manifest.json` paths.
-- `manifest.json` keeps `http://127.0.0.1/*` in `host_permissions` **on purpose** — the browser E2E driver (`test/e2e/`) points the extension at a local `git http-backend` server, and that grant is what lets the service worker fetch/push against it. Production traffic only ever goes to `github.com`; leave the localhost grant in place for the E2E path. The Web Store package is the exception: `npm run pack` strips this grant when building the zip, so the published extension never requests it — **always upload the `npm run pack` output, never a zip of the repo root.**
+- `manifest.json` keeps `http://127.0.0.1/*` in `host_permissions` **on purpose** — the browser E2E driver (`test/e2e/`) points the extension at a local `git http-backend` server, and that grant is what lets the service worker fetch/push against it. Production traffic only ever goes to `github.com`; leave the localhost grant in place for the E2E path. The Web Store package is the exception: `npm run pack` strips this grant when building the zip, so the published extension never requests it. The release workflow packs and uploads for you; if you ever upload by hand, use the `npm run pack` output, never a zip of the repo root.
 - The token lives in `chrome.storage.local` (device-local, but readable by anyone using the Chrome profile). It gets there one of two ways: **Sign in with GitHub** (Device Flow OAuth, `public_repo` scope — the primary path) or a pasted fine-grained PAT under the popup's **Advanced** section (the fallback, required for private forks and when the OAuth App is unavailable). The OAuth path requires `GITHUB_CLIENT_ID` in `background.js` (a registered OAuth App's Client ID — filled in since 965e7b1); if it's ever emptied, only the PAT path works.
 - Chrome Web Store material: `docs/webstore-listing.md` is the copy-paste sheet for the entire developer-dashboard submission (listing text, permission justifications, data-usage checkboxes, reviewer notes). `PRIVACY.md` at the repo root is the listing's privacy policy — its GitHub blob URL (`https://github.com/Lansing-Tech-Studio/pybricks-git-extension/blob/main/PRIVACY.md`) goes in the dashboard, so **don't move or rename it** once the listing is live.
 - ChromeOS: **unmanaged** Chromebooks now work — the whole product is a sideloaded extension with no server or Crostini requirement, so "Load unpacked" (or a future Web Store install) is all that's needed. **Managed** Chromebooks are still the open risk: they block sideloaded extensions, so those need the Web Store listing plus an admin force-install policy.

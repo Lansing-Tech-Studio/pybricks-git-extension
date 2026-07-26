@@ -13,7 +13,7 @@ It works equally well for block-based programs and Python programs — block fil
 - **Commit button** in the editor toolbar — prompts for a commit message (blank = auto-timestamped), then commits *and pushes* every file from the editor straight to your team's GitHub fork.
 - **Pull button** — fetches the fork and applies its files back into the editor: adds new files, updates changed ones, deletes removed ones. Monaco scroll/cursor state and file identities (UUIDs) are preserved on update.
 - **Works on both program types** — Python and block programs round-trip identically; the extension treats the file body as opaque text.
-- **No local server, no install** — the extension does the Git work itself, entirely in the browser. It runs on anything that can sideload a Chrome extension, **including unmanaged (personal) Chromebooks** via Load-unpacked. Managed (school-district) Chromebooks block Load-unpacked, so those need the future Web Store listing plus an admin force-install policy.
+- **No local server, no install** — the extension does the Git work itself, entirely in the browser. It runs on anything that can sideload a Chrome extension, **including unmanaged (personal) Chromebooks** via Load-unpacked. Managed (school-district) Chromebooks block Load-unpacked, so those need the Web Store listing plus an admin force-install policy.
 
 ## How it works
 
@@ -68,7 +68,6 @@ When the mentor updates the upstream shared repository, each team pulls the chan
 In rough priority order:
 
 1. **Open-tab cleanup on delete** — when Pull deletes a file, also clean up its entry in Pybricks' "open tabs" state so the page doesn't log a non-fatal error after reload.
-2. **Chrome Web Store listing** — publish the extension so teams install it from the store, removing even the sideloading step.
 
 ## License
 

@@ -1,0 +1,148 @@
+name: Release
+
+# One-click release. See docs/superpowers/plans/2026-07-25-release-automation.md
+# and docs/superpowers/specs/2026-07-25-release-automation-design.md.
+#
+# Endpoints, enums and the auth chain are pinned from the v2 discovery document
+# at https://chromewebstore.googleapis.com/$discovery/rest?version=v2 — consult
+# it before changing any store call. The v1 API sunsets 2026-10-15.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        required: true
+        type: choice
+        options: [patch, minor, major]
+
+# Two releases must never race an irreversible publish.
+concurrency: release
+
+permissions:
+  contents: write # push the bump commit and create the Release
+  id-token: write # mint the GitHub OIDC token for WIF
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # --generate-notes needs history
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - run: npm ci
+
+      # Gate: a red build never reaches the store.
+      - run: npm test
+
+      - id: bump
+        run: |
+          set -euo pipefail
+          version=$(node scripts/bump.mjs ${{ inputs.bump }})
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "bumped to $version"
+
+      - run: npm run pack
+
+      - id: auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          workload_identity_provider: ${{ vars.WIF_PROVIDER }}
+          service_account: ${{ vars.WIF_SERVICE_ACCOUNT }}
+          token_format: access_token
+          access_token_scopes: https://www.googleapis.com/auth/chromewebstore
+
+      # Publish runs BEFORE the commit/tag/push. A store failure then leaves
+      # nothing persisted and the run can simply be repeated; the reverse order
+      # would leave the repo claiming a release that never shipped.
+      - name: Upload to the Chrome Web Store
+        env:
+          TOKEN: ${{ steps.auth.outputs.access_token }}
+          VERSION: ${{ steps.bump.outputs.version }}
+          PUB: ${{ vars.CWS_PUBLISHER_ID }}
+          EXT: ${{ vars.CWS_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o upload.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@dist/pybricks-git-v$VERSION.zip" \
+            "https://chromewebstore.googleapis.com/upload/v2/publishers/$PUB/items/$EXT:upload")
+
+          echo "HTTP $code"
+          cat upload.json
+
+          # A non-JSON body means the request never reached the API at all.
+          jq -e . upload.json >/dev/null 2>&1 || {
+            echo "::error::upload returned a non-JSON body (HTTP $code)"; exit 1; }
+
+          test "$code" = "200" || { echo "::error::upload returned HTTP $code"; exit 1; }
+
+          # HTTP 200 is not sufficient — the body carries the real verdict.
+          # NOTE: SUCCEEDED/FAILED, not SUCCESS/FAILURE (v1's strings).
+          state=$(jq -r '.uploadState // "MISSING"' upload.json)
+          case "$state" in
+            SUCCEEDED) echo "::notice::upload succeeded" ;;
+            IN_PROGRESS)
+              # ponytail: no polling loop until we see this happen for real. If it
+              # does, poll .../items/$EXT:fetchStatus and read .lastAsyncUploadState.
+              echo "::error::upload still processing (IN_PROGRESS). Re-run, or add fetchStatus polling."
+              exit 1
+              ;;
+            *) echo "::error::upload rejected by the store (uploadState=$state)"; exit 1 ;;
+          esac
+
+      - name: Publish
+        env:
+          TOKEN: ${{ steps.auth.outputs.access_token }}
+          PUB: ${{ vars.CWS_PUBLISHER_ID }}
+          EXT: ${{ vars.CWS_EXTENSION_ID }}
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o publish.json -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Content-Length: 0" \
+            "https://chromewebstore.googleapis.com/v2/publishers/$PUB/items/$EXT:publish")
+
+          echo "HTTP $code"
+          cat publish.json
+
+          jq -e . publish.json >/dev/null 2>&1 || {
+            echo "::error::publish returned a non-JSON body (HTTP $code)"; exit 1; }
+
+          test "$code" = "200" || { echo "::error::publish returned HTTP $code"; exit 1; }
+
+          # PublishItemResponse carries `state` (not `status`). PENDING_REVIEW is
+          # the expected happy path — publishing queues the item for review.
+          state=$(jq -r '.state // "MISSING"' publish.json)
+          case "$state" in
+            PENDING_REVIEW|STAGED|PUBLISHED) echo "::notice::publish accepted (state=$state)" ;;
+            *) echo "::error::publish rejected by the store (state=$state)"; exit 1 ;;
+          esac
+
+          jq -e '.warningInfo' publish.json >/dev/null 2>&1 \
+            && echo "::warning::store returned warnings: $(jq -c .warningInfo publish.json)" || true
+
+      # Only now record it. gh release create makes the tag itself, and the
+      # bump commit is already pushed, so it tags the right commit.
+      - name: Record the release
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add manifest.json
+          git commit -m "chore: release v$VERSION"
+          git push
+          gh release create "v$VERSION" \
+            --title "v$VERSION" \
+            --generate-notes \
+            "dist/pybricks-git-v$VERSION.zip"
