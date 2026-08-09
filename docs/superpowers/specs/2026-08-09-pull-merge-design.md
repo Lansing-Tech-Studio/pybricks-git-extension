@@ -109,7 +109,19 @@ local sha differs from that entry.
 | touched; repo deleted it | canonical path deleted, local contents survive as `<stem>_mine.py` |
 | touched, but local contents already equal the repo's | nothing — no pointless duplicate |
 | local-only, absent from both `base` and `repo` | **kept under its own name**, no rename, no notice |
-| protected path | repo wins, no rescue copy |
+| protected path **that the repo has** | repo wins, no rescue copy |
+| protected path the repo does *not* have, created locally | kept under its own name — see below |
+
+**Protection only bites for paths the repo actually has.** A manifest can name
+a path that doesn't exist upstream — the starter's `.pybricks-git.json` names
+`robot_setup_template.py` and `robot_setup.py`, neither of which has been
+authored yet. If a locally created file took a protected-but-absent name and
+the protected rule applied, there would be no repo version to replace it with,
+so "the repo wins" would degrade to "delete the file the kid just made." The
+local-only row therefore takes precedence: a file absent from both `base` and
+`repo` keeps its name whether or not the manifest reserves it. A protected path
+that *was* in `base` and the repo has since deleted is unaffected — the coach
+removed it deliberately, so it goes, with no rescue copy.
 
 The local-only row is the fix for the reported loss: a path nobody else has an
 opinion about is uncontested, so it is carried into the payload untouched.
