@@ -29,8 +29,13 @@ function rescueName(path, taken) {
 //   repo           [{path, contents}]       what the Pull fetched
 //   base           {path: sha}              lastPullShas: the last state the
 //                                           editor and the repo agreed on
-//   protectedPaths [path]                   coach-managed; the repo always
-//                                           wins and no copy is kept
+//   protectedPaths [path]                   coach-managed; when the repo has
+//                                           the file (now or per `base`), it
+//                                           always wins and no copy is kept.
+//                                           A protected name absent from both
+//                                           `base` and `repo` has no coach
+//                                           version to restore, so it's just
+//                                           an ordinary local-only file.
 function planPull({ local, repo, base = {}, protectedPaths = [] }) {
     const prot = new Set(protectedPaths);
     const baseSha = new Map(Object.entries(base));
@@ -43,17 +48,22 @@ function planPull({ local, repo, base = {}, protectedPaths = [] }) {
         // Provably untouched since the last Pull: whatever the repo says goes,
         // including a deletion. `files` already carries the repo's version.
         if (baseSha.has(f.path) && baseSha.get(f.path) === f.sha) continue;
-        // Coach-managed: the repo wins and a _mine copy would be clutter the
-        // kid can't use, since commitOp refuses to push protected paths anyway.
-        if (prot.has(f.path)) continue;
 
         const upstream = repoContents.get(f.path);
         if (upstream === undefined && !baseSha.has(f.path)) {
             // Created in the editor, never committed, and nobody else claims
-            // the name — uncontested, so it keeps it.
+            // the name — uncontested, so it keeps it. Applies even to a
+            // protected name: with no repo/base version, "protected" has
+            // nothing to protect.
             files.push({ path: f.path, contents: f.contents });
             continue;
         }
+        // Coach-managed and the repo has a say (it has the file now, or it
+        // did per `base` and has since removed it): the repo wins and a
+        // _mine copy would be clutter the kid can't use, since commitOp
+        // refuses to push protected paths anyway.
+        if (prot.has(f.path)) continue;
+
         if (upstream === f.contents) continue; // edited into agreement
 
         const savedAs = rescueName(f.path, taken);

@@ -152,4 +152,43 @@ describe('planPull', () => {
         });
         assert.deepEqual(byPath(files), { 'a.py': 'theirs\n', 'a_mine.py': 'mine\n' });
     });
+
+    test('rescue name avoids a name a local file already occupies', () => {
+        const { files, rescued } = planPull({
+            local: [
+                L('a.py', 'mine\n', 'sha-mine'),
+                L('a_mine.py', 'wip\n', 'sha-wip'),
+            ],
+            repo: [R('a.py', 'theirs\n')],
+            base: { 'a.py': 'sha-old' },
+        });
+        assert.deepEqual(byPath(files), {
+            'a.py': 'theirs\n',
+            'a_mine.py': 'wip\n',
+            'a_mine2.py': 'mine\n',
+        });
+        assert.deepEqual(rescued, [{ path: 'a.py', savedAs: 'a_mine2.py' }]);
+    });
+
+    test('protected name absent from base and repo: local file keeps its own name', () => {
+        const { files, rescued } = planPull({
+            local: [L('robot_setup.py', 'kid wip\n', 'sha-1')],
+            repo: [],
+            base: {},
+            protectedPaths: ['robot_setup.py'],
+        });
+        assert.deepEqual(byPath(files), { 'robot_setup.py': 'kid wip\n' });
+        assert.deepEqual(rescued, []);
+    });
+
+    test('protected file the coach deleted (was in base, gone from repo): dropped, no rescue', () => {
+        const { files, rescued } = planPull({
+            local: [L('robot_setup.py', 'kid wip\n', 'sha-2')],
+            repo: [],
+            base: { 'robot_setup.py': 'sha-1' },
+            protectedPaths: ['robot_setup.py'],
+        });
+        assert.deepEqual(files, []);
+        assert.deepEqual(rescued, []);
+    });
 });
