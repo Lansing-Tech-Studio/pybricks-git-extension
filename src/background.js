@@ -243,6 +243,18 @@ async function commitOp(d, msg) {
             } else preserved.push(path);
         }
         for (const f of files) {
+            // Untouched since the last Pull: leave the tree's version alone. `next`
+            // starts as a copy of the fetched tree, so skipping preserves a
+            // teammate's newer push — and their deletion — instead of reverting it
+            // with our stale copy. A path with no lastPullShas entry is never
+            // "untouched", so newly created files still commit normally, and an
+            // absent lastPullShas disables the guard entirely (pre-upgrade installs
+            // keep today's behavior). It goes ahead of the protected check so an
+            // upstream change to a protected file the kid never edited doesn't
+            // raise a false "your version wasn't committed" notice.
+            if (pullShas && pullShas[f.path] && pullShas[f.path] === (await sha256Hex(f.contents))) {
+                continue;
+            }
             if (protectedPaths.has(f.path)) {
                 // The tree's version always wins for protected paths. Report the
                 // path only when the editor actually diverged (changed contents, or

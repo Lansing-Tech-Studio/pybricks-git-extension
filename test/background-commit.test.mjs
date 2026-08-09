@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupEngine } from './engine-helpers.mjs';
-import { bareHead, bareFile, bareSubjects } from './git-http-server.mjs';
+import { bareHead, bareFile, bareSubjects, pushCompeting } from './git-http-server.mjs';
 
 const BLOCK = '# pybricks blocks file:{"a":1,"b":[2,3]}\nfrom pybricks import *\n';
 
@@ -113,6 +113,69 @@ test('commit falls back to lastPullPaths when lastPullShas is absent', async () 
         // bareFile shells out to `git show` and THROWS for a missing path — it
         // does not return null. This is how the existing tests assert absence.
         assert.throws(() => bareFile(bare, 'starter.py'));
+    } finally {
+        await server.close();
+    }
+});
+
+test('a stale untouched file does not revert a teammate\'s push', async () => {
+    const { engine, bare, server } = await setupEngine({
+        'shared.py': 'v1\n',
+        'mine.py': 'a = 1\n',
+    });
+    try {
+        // Pull records shas for v1 of both files.
+        await engine.pull();
+        // A teammate pushes a newer shared.py while our editor still holds v1.
+        pushCompeting(bare, { 'shared.py': 'v2\n' }, 'teammate edit');
+        // We commit our own edit; our payload still carries the stale shared.py.
+        const result = await engine.commit({
+            files: [
+                { path: 'shared.py', contents: 'v1\n' },
+                { path: 'mine.py', contents: 'a = 2\n' },
+            ],
+            message: 'my edit',
+        });
+        assert.equal(result.committed, true);
+        assert.equal(bareFile(bare, 'shared.py'), 'v2\n'); // theirs survived
+        assert.equal(bareFile(bare, 'mine.py'), 'a = 2\n'); // ours landed
+    } finally {
+        await server.close();
+    }
+});
+
+test('an edited file still overwrites the tree version', async () => {
+    const { engine, bare, server } = await setupEngine({ 'shared.py': 'v1\n' });
+    try {
+        await engine.pull();
+        const result = await engine.commit({
+            files: [{ path: 'shared.py', contents: 'v1 edited\n' }],
+            message: 'genuine edit',
+        });
+        assert.equal(result.committed, true);
+        assert.equal(bareFile(bare, 'shared.py'), 'v1 edited\n');
+    } finally {
+        await server.close();
+    }
+});
+
+test('an untouched file whose upstream copy was deleted stays deleted', async () => {
+    const { engine, bare, server } = await setupEngine({
+        'gone.py': 'v1\n',
+        'mine.py': 'a = 1\n',
+    });
+    try {
+        await engine.pull();
+        pushCompeting(bare, { 'gone.py': null }, 'teammate deleted it');
+        const result = await engine.commit({
+            files: [
+                { path: 'gone.py', contents: 'v1\n' },
+                { path: 'mine.py', contents: 'a = 2\n' },
+            ],
+            message: 'my edit',
+        });
+        assert.equal(result.committed, true);
+        assert.throws(() => bareFile(bare, 'gone.py'));
     } finally {
         await server.close();
     }
