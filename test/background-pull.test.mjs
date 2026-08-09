@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { setupEngine, memStorage } from './engine-helpers.mjs';
 import { makeEngine } from './load-background.mjs';
 
@@ -59,7 +60,15 @@ test('pull returns .py files (block files byte-exact), skips non-.py, records sn
         const byPath = Object.fromEntries(result.files.map((f) => [f.path, f.contents]));
         assert.deepEqual(Object.keys(byPath).sort(), ['lib/util.py', 'prog.py']);
         assert.equal(byPath['prog.py'], BLOCK);
-        assert.deepEqual((await storage.get('lastPullPaths')).sort(), ['lib/util.py', 'prog.py']);
+        const shas = await storage.get('lastPullShas');
+        assert.deepEqual(Object.keys(shas).sort(), ['lib/util.py', 'prog.py']);
+        // Hex sha256 of the exact contents string — the same value Pybricks
+        // stores on each metadata row, so the two sides compare directly.
+        assert.match(shas['prog.py'], /^[0-9a-f]{64}$/);
+        assert.equal(
+            shas['prog.py'],
+            createHash('sha256').update(BLOCK, 'utf8').digest('hex'),
+        );
     } finally {
         await server.close();
     }
@@ -76,18 +85,18 @@ test('pull from an empty repo warns but succeeds with no files', async () => {
     }
 });
 
-test('pull from an empty repo does NOT clobber a prior lastPullPaths snapshot', async () => {
+test('pull from an empty repo does NOT clobber a prior lastPullShas snapshot', async () => {
     // An empty/missing-branch pull shows the editor nothing, so it must not
-    // overwrite the last-Pull snapshot with []. Otherwise the next Commit would
+    // overwrite the last-Pull snapshot with {}. Otherwise the next Commit would
     // treat every previously-tracked path as "known" and delete it. (The empty
     // list is also never applied to the editor — see content.js pull().)
     const { engine, storage, server } = await setupEngine();
     try {
-        await storage.set({ lastPullPaths: ['keep.py'] });
+        await storage.set({ lastPullShas: { 'keep.py': 'deadbeef' } });
         const result = await engine.pull();
         assert.equal(result.files.length, 0);
         assert.notEqual(result.pullWarning, '');
-        assert.deepEqual(await storage.get('lastPullPaths'), ['keep.py']);
+        assert.deepEqual(await storage.get('lastPullShas'), { 'keep.py': 'deadbeef' });
     } finally {
         await server.close();
     }

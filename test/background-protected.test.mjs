@@ -173,7 +173,7 @@ test('deleting a protected file from the editor keeps it upstream and reports it
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull(); // menu.py enters the lastPullPaths snapshot
+        await engine.pull(); // menu.py enters the lastPullShas snapshot
         const result = await engine.commit({
             files: [{ path: 'team.py', contents: 'x = 2\n' }], // menu.py gone from editor
             message: 'deleted menu locally',
@@ -254,7 +254,7 @@ test('commit of zero files against an empty repo returns protectedSkipped: []', 
     }
 });
 
-test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullPaths', async () => {
+test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullShas', async () => {
     const { engine, storage, server } = await setupEngine({
         '.pybricks-git.json': JSON.stringify({
             schemaVersion: 1,
@@ -273,7 +273,7 @@ test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullPa
             setupTemplate: null,
             teamSetup: null,
         });
-        assert.deepEqual((await storage.get('lastPullPaths')).sort(), ['a.py', 'menu.py']);
+        assert.deepEqual(Object.keys(await storage.get('lastPullShas')).sort(), ['a.py', 'menu.py']);
     } finally {
         await server.close();
     }
@@ -359,7 +359,7 @@ test('one commit mixing a protected deletion and a divergent protected edit repo
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull(); // both protected paths enter the lastPullPaths snapshot
+        await engine.pull(); // both protected paths enter the lastPullShas snapshot
         const result = await engine.commit({
             files: [
                 { path: 'main.py', contents: 'MAIN = 999\n' }, // divergent protected edit

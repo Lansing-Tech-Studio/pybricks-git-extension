@@ -98,3 +98,22 @@ test('commit of zero files against an empty repo is a no-op', async () => {
         await server.close();
     }
 });
+
+test('commit falls back to lastPullPaths when lastPullShas is absent', async () => {
+    const { engine, bare, storage, server } = await setupEngine({ 'starter.py': 'shared = True\n' });
+    try {
+        // An install that pulled before the upgrade: only the old key exists.
+        await storage.set({ lastPullPaths: ['starter.py'] });
+        const result = await engine.commit({
+            files: [{ path: 'team.py', contents: 'ours = 1\n' }],
+            message: 'old snapshot',
+        });
+        assert.equal(result.committed, true);
+        assert.deepEqual(result.preserved, []);
+        // bareFile shells out to `git show` and THROWS for a missing path — it
+        // does not return null. This is how the existing tests assert absence.
+        assert.throws(() => bareFile(bare, 'starter.py'));
+    } finally {
+        await server.close();
+    }
+});

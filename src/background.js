@@ -130,6 +130,16 @@ async function readProtectedPaths(d, fileMap) {
     return (await readManifestInfo(d, fileMap)).protected;
 }
 
+// Hex sha256 of a contents string — byte-identical to what Pybricks stores on
+// each metadata row and what inject.js:sha256() computes, so the engine's shas
+// and the editor's compare directly with no conversion.
+async function sha256Hex(text) {
+    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(hash))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
 async function pullOp(d) {
     const s = await getSettings(d);
     requireConfigured(s);
@@ -147,12 +157,14 @@ async function pullOp(d) {
     }
     // Only update the snapshot when the editor was actually shown a file set.
     // An empty/missing-branch pull applies nothing (content.js skips it), so
-    // clobbering lastPullPaths to [] here would make the next Commit treat every
+    // clobbering lastPullShas to {} here would make the next Commit treat every
     // previously-tracked path as known and delete it. lastPullManifest follows
     // the same guard so an empty-branch pull leaves the last real snapshot intact.
     if (head) {
         await d.storage.set({
-            lastPullPaths: files.map((f) => f.path),
+            lastPullShas: Object.fromEntries(
+                await Promise.all(files.map(async (f) => [f.path, await sha256Hex(f.contents)])),
+            ),
             lastPullManifest: {
                 protected: [...manifestInfo.protected],
                 menuConfig: manifestInfo.menuConfig,
@@ -202,7 +214,12 @@ async function commitOp(d, msg) {
     const files = msg.files ?? [];
     const s = await getSettings(d);
     requireConfigured(s);
-    const snapshot = new Set((await d.storage.get('lastPullPaths')) ?? []);
+    // lastPullShas replaced lastPullPaths; fall back for installs that haven't
+    // pulled since the upgrade, so their tracked-file set survives.
+    const pullShas = await d.storage.get('lastPullShas');
+    const snapshot = new Set(
+        pullShas ? Object.keys(pullShas) : ((await d.storage.get('lastPullPaths')) ?? []),
+    );
     let lastErr;
     for (let attempt = 0; attempt < 3; attempt++) {
         const head = await fetchRemoteHead(d, s);
