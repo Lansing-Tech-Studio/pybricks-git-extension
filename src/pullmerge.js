@@ -17,5 +17,49 @@ function rescueName(path, taken) {
     }
 }
 
-// Task 2 replaces this stub with the real merge-planning function.
-function planPull() {}
+// Decides what the editor should hold after a Pull. `files` is the COMPLETE
+// desired set for the `apply-files` op — that op deletes every path it isn't
+// given, so anything omitted here is destroyed.
+//
+//   local          [{path, contents, sha}]  the editor now; `sha` is the
+//                                           metadata row's sha256, and a
+//                                           missing one counts as edited —
+//                                           the safe direction, a spurious
+//                                           rescue rather than a silent loss
+//   repo           [{path, contents}]       what the Pull fetched
+//   base           {path: sha}              lastPullShas: the last state the
+//                                           editor and the repo agreed on
+//   protectedPaths [path]                   coach-managed; the repo always
+//                                           wins and no copy is kept
+function planPull({ local, repo, base = {}, protectedPaths = [] }) {
+    const prot = new Set(protectedPaths);
+    const baseSha = new Map(Object.entries(base));
+    const repoContents = new Map(repo.map((f) => [f.path, f.contents]));
+    const files = repo.map((f) => ({ path: f.path, contents: f.contents }));
+    const taken = new Set([...repoContents.keys(), ...local.map((f) => f.path)]);
+    const rescued = [];
+
+    for (const f of local) {
+        // Provably untouched since the last Pull: whatever the repo says goes,
+        // including a deletion. `files` already carries the repo's version.
+        if (baseSha.has(f.path) && baseSha.get(f.path) === f.sha) continue;
+        // Coach-managed: the repo wins and a _mine copy would be clutter the
+        // kid can't use, since commitOp refuses to push protected paths anyway.
+        if (prot.has(f.path)) continue;
+
+        const upstream = repoContents.get(f.path);
+        if (upstream === undefined && !baseSha.has(f.path)) {
+            // Created in the editor, never committed, and nobody else claims
+            // the name — uncontested, so it keeps it.
+            files.push({ path: f.path, contents: f.contents });
+            continue;
+        }
+        if (upstream === f.contents) continue; // edited into agreement
+
+        const savedAs = rescueName(f.path, taken);
+        taken.add(savedAs);
+        files.push({ path: savedAs, contents: f.contents });
+        rescued.push({ path: f.path, savedAs });
+    }
+    return { files, rescued };
+}
