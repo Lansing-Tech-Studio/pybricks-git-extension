@@ -2,7 +2,7 @@
 // with a Node http server. Hermetic: binds 127.0.0.1:0, needs only `git`.
 import { createServer } from 'node:http';
 import { spawn, execFileSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 
@@ -77,6 +77,12 @@ export function pushCompeting(bare, files, message) {
     git(w, 'checkout', '-q', '-B', 'main');
     for (const [rel, contents] of Object.entries(files)) {
         const full = join(w, rel);
+        // null means "the teammate deleted this path" — `git add -A` below
+        // stages the removal.
+        if (contents === null) {
+            rmSync(full, { force: true });
+            continue;
+        }
         mkdirSync(dirname(full), { recursive: true });
         writeFileSync(full, contents);
     }

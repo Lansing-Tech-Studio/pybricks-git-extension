@@ -357,17 +357,20 @@ function planPull({ local, repo, base = {}, protectedPaths = [] }) {
         // Provably untouched since the last Pull: whatever the repo says goes,
         // including a deletion. `files` already carries the repo's version.
         if (baseSha.has(f.path) && baseSha.get(f.path) === f.sha) continue;
-        // Coach-managed: the repo wins and a _mine copy would be clutter the
-        // kid can't use, since commitOp refuses to push protected paths anyway.
-        if (prot.has(f.path)) continue;
 
         const upstream = repoContents.get(f.path);
         if (upstream === undefined && !baseSha.has(f.path)) {
             // Created in the editor, never committed, and nobody else claims
-            // the name — uncontested, so it keeps it.
+            // the name — uncontested, so it keeps it. This is checked BEFORE
+            // the protected rule: a manifest can reserve a path the repo does
+            // not actually have, and "the repo wins" with no repo version to
+            // win with would just delete the file the kid made.
             files.push({ path: f.path, contents: f.contents });
             continue;
         }
+        // Coach-managed: the repo wins and a _mine copy would be clutter the
+        // kid can't use, since commitOp refuses to push protected paths anyway.
+        if (prot.has(f.path)) continue;
         if (upstream === f.contents) continue; // edited into agreement
 
         const savedAs = rescueName(f.path, taken);
@@ -729,6 +732,10 @@ Replace those two statements with:
         // plus rescued copies of anything edited locally, plus never-committed
         // local files left alone.
         const editor = await pageRequest('list-files');
+        // NOTE (corrected during execution): the `base` read below MUST happen
+        // BEFORE `serverRequest('pull')`. `pullOp` writes `lastPullShas` inside
+        // the op, so reading it afterwards hands planPull the shas of the file
+        // set the repo just delivered — making every untouched file look edited.
         const shaByPath = new Map(editor.metadata.map((m) => [m.path, m.sha256]));
         const plan = planPull({
             local: editor.contents.map((c) => ({
@@ -903,7 +910,7 @@ In "The git engine", the **Pull** bullet says it records `lastPullPaths`; change
 Add a subsection under "Architecture" (after the ISOLATED-world script list, which must also gain `pullmerge.js` in its load order) :
 
 ```markdown
-**Pull merges, it does not clobber.** `content.js:pull()` never hands the repo's file set straight to `apply-files` — that op deletes every path it isn't given, which used to destroy uncommitted local work. `src/pullmerge.js:planPull()` (pure, no DOM, unit-tested via `test/load-pullmerge.mjs`) computes the complete desired set from the editor's files, the repo's files, the `lastPullShas` base, and the protected list. Files untouched since the last Pull take the repo's version; locally edited files let the repo keep the canonical path and are rescued to `<stem>_mine.py` (a valid module name, so the hub can still import it); files created locally and never committed keep their own name; protected paths are overwritten with no rescue copy. Rescues are reported through the `pullRescued` key as a notice on the next load. Design: `docs/superpowers/specs/2026-08-09-pull-merge-design.md`.
+**Pull merges, it does not clobber.** `content.js:pull()` never hands the repo's file set straight to `apply-files` — that op deletes every path it isn't given, which used to destroy uncommitted local work. `src/pullmerge.js:planPull()` (pure, no DOM, unit-tested via `test/load-pullmerge.mjs`) computes the complete desired set from the editor's files, the repo's files, the `lastPullShas` base, and the protected list. Files untouched since the last Pull take the repo's version; locally edited files let the repo keep the canonical path and are rescued to `<stem>_mine.py` (a valid module name, so the hub can still import it); files created locally and never committed keep their own name; protected paths **that the repo actually has** are overwritten with no rescue copy. Protection is checked after the never-committed rule on purpose — a manifest can reserve a path the repo doesn't have (the starter reserves `robot_setup.py`, never authored), and with no repo version to restore, "the repo wins" would just delete the file the kid made. Rescues are reported through the `pullRescued` key as a notice on the next load. Design: `docs/superpowers/specs/2026-08-09-pull-merge-design.md`.
 ```
 
 - [ ] **Step 4: Commit**

@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { setupEngine } from './engine-helpers.mjs';
-import { bareHead, bareFile } from './git-http-server.mjs';
+import { bareHead, bareFile, pushCompeting } from './git-http-server.mjs';
 
 const MANIFEST = JSON.stringify({
     schemaVersion: 1,
@@ -173,7 +174,7 @@ test('deleting a protected file from the editor keeps it upstream and reports it
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull(); // menu.py enters the lastPullPaths snapshot
+        await engine.pull(); // menu.py enters the lastPullShas snapshot
         const result = await engine.commit({
             files: [{ path: 'team.py', contents: 'x = 2\n' }], // menu.py gone from editor
             message: 'deleted menu locally',
@@ -254,7 +255,7 @@ test('commit of zero files against an empty repo returns protectedSkipped: []', 
     }
 });
 
-test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullPaths', async () => {
+test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullShas', async () => {
     const { engine, storage, server } = await setupEngine({
         '.pybricks-git.json': JSON.stringify({
             schemaVersion: 1,
@@ -273,7 +274,7 @@ test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullPa
             setupTemplate: null,
             teamSetup: null,
         });
-        assert.deepEqual((await storage.get('lastPullPaths')).sort(), ['a.py', 'menu.py']);
+        assert.deepEqual(Object.keys(await storage.get('lastPullShas')).sort(), ['a.py', 'menu.py']);
     } finally {
         await server.close();
     }
@@ -349,6 +350,56 @@ test('empty-branch pull leaves lastPullManifest untouched', async () => {
     }
 });
 
+test('an untouched protected file whose upstream copy changed is not reported (guard precedes the protected check)', async () => {
+    const { engine, bare, server } = await setupEngine({
+        '.pybricks-git.json': MANIFEST,
+        'menu.py': 'L1\n',
+    });
+    try {
+        await engine.pull(); // lastPullShas records menu.py's sha for L1
+        pushCompeting(bare, { 'menu.py': 'L2\n' }, 'coach update'); // upstream diverges
+        const result = await engine.commit({
+            files: [{ path: 'menu.py', contents: 'L1\n' }], // editor still holds the pulled L1
+            message: 'no real edit',
+        });
+        // A guard placed after the protected check would see L1 !== L2 and
+        // wrongly report menu.py as skipped, even though the editor never
+        // touched it. Correct placement never reaches the protected branch.
+        assert.deepEqual(result.protectedSkipped, []);
+        assert.equal(bareFile(bare, 'menu.py'), 'L2\n'); // coach's push stood
+    } finally {
+        await server.close();
+    }
+});
+
+test('a diverged protected path keeps its original pulled sha, not the editor\'s or the tree\'s current value', async () => {
+    const { engine, bare, storage, server } = await setupEngine({
+        '.pybricks-git.json': MANIFEST,
+        'menu.py': 'L1\n',
+        'team.py': 'x = 1\n',
+    });
+    try {
+        await engine.pull();
+        const originalSha = (await storage.get('lastPullShas'))['menu.py'];
+        pushCompeting(bare, { 'menu.py': 'L2\n' }, 'coach update'); // tree now L2
+        const result = await engine.commit({
+            files: [
+                { path: 'menu.py', contents: 'L3\n' }, // editor diverged to a third value
+                { path: 'team.py', contents: 'x = 2\n' }, // genuine change so the commit pushes
+            ],
+            message: 'sneaky menu edit plus a real one',
+        });
+        assert.equal(result.committed, true);
+        assert.deepEqual(result.protectedSkipped, ['menu.py']);
+        const shas = await storage.get('lastPullShas');
+        assert.equal(shas['menu.py'], originalSha); // still L1's sha
+        assert.notEqual(shas['menu.py'], createHash('sha256').update('L3\n', 'utf8').digest('hex'));
+        assert.notEqual(shas['menu.py'], createHash('sha256').update('L2\n', 'utf8').digest('hex'));
+    } finally {
+        await server.close();
+    }
+});
+
 test('one commit mixing a protected deletion and a divergent protected edit reports both', async () => {
     // (deferred from phase 2) menu.py + main.py are both protected. One commit
     // omits menu.py (deletion attempt) and edits main.py (divergent edit).
@@ -359,7 +410,7 @@ test('one commit mixing a protected deletion and a divergent protected edit repo
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull(); // both protected paths enter the lastPullPaths snapshot
+        await engine.pull(); // both protected paths enter the lastPullShas snapshot
         const result = await engine.commit({
             files: [
                 { path: 'main.py', contents: 'MAIN = 999\n' }, // divergent protected edit

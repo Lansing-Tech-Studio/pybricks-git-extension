@@ -130,6 +130,16 @@ async function readProtectedPaths(d, fileMap) {
     return (await readManifestInfo(d, fileMap)).protected;
 }
 
+// Hex sha256 of a contents string — byte-identical to what Pybricks stores on
+// each metadata row and what inject.js:sha256() computes, so the engine's shas
+// and the editor's compare directly with no conversion.
+async function sha256Hex(text) {
+    const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(text));
+    return Array.from(new Uint8Array(hash))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
 async function pullOp(d) {
     const s = await getSettings(d);
     requireConfigured(s);
@@ -147,12 +157,14 @@ async function pullOp(d) {
     }
     // Only update the snapshot when the editor was actually shown a file set.
     // An empty/missing-branch pull applies nothing (content.js skips it), so
-    // clobbering lastPullPaths to [] here would make the next Commit treat every
+    // clobbering lastPullShas to {} here would make the next Commit treat every
     // previously-tracked path as known and delete it. lastPullManifest follows
     // the same guard so an empty-branch pull leaves the last real snapshot intact.
     if (head) {
         await d.storage.set({
-            lastPullPaths: files.map((f) => f.path),
+            lastPullShas: Object.fromEntries(
+                await Promise.all(files.map(async (f) => [f.path, await sha256Hex(f.contents)])),
+            ),
             lastPullManifest: {
                 protected: [...manifestInfo.protected],
                 menuConfig: manifestInfo.menuConfig,
@@ -202,7 +214,12 @@ async function commitOp(d, msg) {
     const files = msg.files ?? [];
     const s = await getSettings(d);
     requireConfigured(s);
-    const snapshot = new Set((await d.storage.get('lastPullPaths')) ?? []);
+    // lastPullShas replaced lastPullPaths; fall back for installs that haven't
+    // pulled since the upgrade, so their tracked-file set survives.
+    const pullShas = await d.storage.get('lastPullShas');
+    const snapshot = new Set(
+        pullShas ? Object.keys(pullShas) : ((await d.storage.get('lastPullPaths')) ?? []),
+    );
     let lastErr;
     for (let attempt = 0; attempt < 3; attempt++) {
         const head = await fetchRemoteHead(d, s);
@@ -214,6 +231,10 @@ async function commitOp(d, msg) {
         const next = new Map(existing);
         const preserved = [];
         const protectedSkipped = [];
+        // Base-sha updates for this attempt only (reset on PushRejectedError
+        // retry, applied to storage only after this attempt's push succeeds).
+        // null means "delete this path's entry".
+        const shaUpdates = new Map();
         for (const path of existing.keys()) {
             if (!path.endsWith('.py')) continue;
             if (files.some((f) => f.path === path)) continue;
@@ -222,10 +243,24 @@ async function commitOp(d, msg) {
             if (snapshot.has(path)) {
                 // Deleting a protected file is an edit too — the tree's copy stays.
                 if (protectedPaths.has(path)) protectedSkipped.push(path);
-                else next.delete(path);
+                else {
+                    next.delete(path);
+                    shaUpdates.set(path, null);
+                }
             } else preserved.push(path);
         }
         for (const f of files) {
+            const fileSha = await sha256Hex(f.contents);
+            // Skip files unchanged since the last Pull: `next` starts as a copy of the
+            // fetched tree, so skipping keeps a teammate's newer push (or deletion)
+            // instead of reverting it with our stale copy. Requires `head` — with no
+            // fetched tree, `next` is empty, so skipping would drop the file instead
+            // of leaving anything standing. MUST stay ahead of the protected check —
+            // otherwise an upstream change to a protected file the kid never edited
+            // raises a false "not committed" notice.
+            if (head && pullShas && pullShas[f.path] && pullShas[f.path] === fileSha) {
+                continue;
+            }
             if (protectedPaths.has(f.path)) {
                 // The tree's version always wins for protected paths. Report the
                 // path only when the editor actually diverged (changed contents, or
@@ -245,6 +280,7 @@ async function commitOp(d, msg) {
                 blob: new TextEncoder().encode(f.contents),
             });
             next.set(f.path, { oid, mode: '100644' });
+            shaUpdates.set(f.path, fileSha);
         }
         const newTree = await writeTreeFromMap(d, next);
         const oldTree = head
@@ -282,6 +318,18 @@ async function commitOp(d, msg) {
                 remoteRef: `refs/heads/${s.branch}`,
                 onAuth: onAuth(s),
             });
+            // Move the base forward for exactly what this commit wrote: overlaid
+            // paths get the sha we just pushed, deleted paths lose their entry.
+            // Guard-skipped and diverged-protected paths keep their old entry —
+            // the repo, not the editor, is what changed for those.
+            if (shaUpdates.size) {
+                const merged = { ...(pullShas ?? {}) };
+                for (const [path, sha] of shaUpdates) {
+                    if (sha === null) delete merged[path];
+                    else merged[path] = sha;
+                }
+                await d.storage.set({ lastPullShas: merged });
+            }
             return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved, protectedSkipped };
         } catch (err) {
             if (err && err.code === 'PushRejectedError') {

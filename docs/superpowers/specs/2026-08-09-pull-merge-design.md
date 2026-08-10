@@ -1,7 +1,7 @@
 # Merge on Pull — design
 
 Date: 2026-08-09
-Status: approved, not yet implemented
+Status: implemented on `feat/merge-on-pull` — see `docs/superpowers/plans/2026-08-09-merge-on-pull.md`
 
 ## Problem
 
@@ -66,10 +66,12 @@ Locked with Brendon during design:
 over the file set the repo just handed the editor, written under the same
 `if (head)` guard that protects the existing snapshot from empty-branch pulls.
 
-`sha256` is hex SHA-256 of the contents string — the same value Pybricks stores
-on each `metadata` row and that `inject.js:sha256()` recomputes. Both sides of
-every comparison are therefore free: the repo side is hashed once at pull time,
-the local side is read off `list-files`' metadata rows.
+`sha256` is hex SHA-256 of the contents string — the same algorithm Pybricks
+uses for each `metadata` row's stored `sha256` and that `inject.js:sha256()`
+computes. The repo side is hashed once at pull time; the local side is
+recomputed in `content.js` from `list-files`' contents rather than trusted off
+the metadata row, since that stored value is only as current as Pybricks' own
+write path keeps it.
 
 `commitOp`'s deletion snapshot becomes `Object.keys(lastPullShas)`, falling back
 to `lastPullPaths` when `lastPullShas` is absent so installs that haven't pulled
@@ -90,8 +92,10 @@ One exported function:
 planPull({local, repo, base, protectedPaths}) → {files, rescued}
 ```
 
-- `local` — `[{path, contents, sha}]` from `list-files` (metadata joined to
-  contents; `sha` recomputed when a metadata row lacks `sha256`).
+- `local` — `[{path, contents, sha}]` from `list-files`; `sha` is always
+  recomputed from `contents` in `content.js` (matching `inject.js:sha256()`
+  byte-for-byte) rather than read off the metadata row's stored `sha256`,
+  since that value is only as current as Pybricks' own write path keeps it.
 - `repo` — `[{path, contents}]` from the `pull` op.
 - `base` — the `lastPullShas` map, possibly empty.
 - `protectedPaths` — the `protected` array the `pull` op already returns.
@@ -109,7 +113,19 @@ local sha differs from that entry.
 | touched; repo deleted it | canonical path deleted, local contents survive as `<stem>_mine.py` |
 | touched, but local contents already equal the repo's | nothing — no pointless duplicate |
 | local-only, absent from both `base` and `repo` | **kept under its own name**, no rename, no notice |
-| protected path | repo wins, no rescue copy |
+| protected path **that the repo has** | repo wins, no rescue copy |
+| protected path the repo does *not* have, created locally | kept under its own name — see below |
+
+**Protection only bites for paths the repo actually has.** A manifest can name
+a path that doesn't exist upstream — the starter's `.pybricks-git.json` names
+`robot_setup_template.py` and `robot_setup.py`, neither of which has been
+authored yet. If a locally created file took a protected-but-absent name and
+the protected rule applied, there would be no repo version to replace it with,
+so "the repo wins" would degrade to "delete the file the kid just made." The
+local-only row therefore takes precedence: a file absent from both `base` and
+`repo` keeps its name whether or not the manifest reserves it. A protected path
+that *was* in `base` and the repo has since deleted is unaffected — the coach
+removed it deliberately, so it goes, with no rescue copy.
 
 The local-only row is the fix for the reported loss: a path nobody else has an
 opinion about is uncontested, so it is carried into the payload untouched.
@@ -128,11 +144,14 @@ never lossy.
 
 ### `content.js:pull()`
 
-Between the `pull` op and the `apply-files` call: fetch `list-files`, read
-`lastPullShas` from `chrome.storage.local` (the ISOLATED world has direct
-access), call `planPull`, and apply `files` instead of `result.files`. The
-existing `pullWarning` early return and the reload-on-change behavior are
-unchanged.
+**Read `lastPullShas` BEFORE the `pull` op**, not after — `pullOp` writes that
+key before it returns, so a later read would hand `planPull` the shas of the
+file set the repo just delivered and make every untouched file look edited
+(spurious `_mine` copies of stale versions, and upstream deletions never
+landing). Then, between the `pull` op and the `apply-files` call: fetch
+`list-files`, hash each contents row, call `planPull`, and apply `files`
+instead of `result.files`. The existing `pullWarning` early return and the
+reload-on-change behavior are unchanged.
 
 When `rescued` is non-empty, show a notice before the reload, reusing
 `showProtectedNotice`'s styling and dismiss behavior:

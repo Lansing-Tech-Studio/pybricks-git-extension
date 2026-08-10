@@ -26,19 +26,22 @@ function pageRequest(op, payload) {
     });
 }
 
+const storageGet = (key) =>
+    new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key])));
+const storageSet = (obj) =>
+    new Promise((resolve) => chrome.storage.local.set(obj, () => resolve()));
+
 const menuPanel = makeMenuPanel({
     pageRequest,
     serverRequest,
-    storageGet: (key) =>
-        new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
-    storageSet: (obj) => new Promise((resolve) => chrome.storage.local.set(obj, () => resolve())),
+    storageGet,
+    storageSet,
     reload: () => location.reload(),
 });
 
 const fileListWatcher = makeFileListWatcher({
     pageRequest,
-    storageGet: (key) =>
-        new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
+    storageGet,
     addSlot: (module, fn, blocks) => menuPanel.addSlot(module, fn, blocks),
     onNewProgram: () =>
         menuPanel.newProgram().catch((err) =>
@@ -48,6 +51,8 @@ const fileListWatcher = makeFileListWatcher({
 fileListWatcher.start().catch((err) => console.warn('[pybricks-git] file-list watcher failed:', err));
 
 mountButton().catch((err) => console.warn('[pybricks-git] mount failed:', err));
+
+showRescueNotice().catch((err) => console.warn('[pybricks-git] rescue notice failed:', err));
 
 async function mountButton() {
     const toolbar = await waitFor(() =>
@@ -226,6 +231,59 @@ function showProtectedNotice(paths) {
     setTimeout(() => box.remove(), 15000);
 }
 
+// Kid-facing report of what Pull rescued. Rendered on the page load *after*
+// the pull's reload, because that's when the rescued files are actually
+// visible in the file list. Click, Escape, or the timeout dismisses it.
+async function showRescueNotice() {
+    const rescued = await storageGet('pullRescued');
+    if (!rescued || !rescued.length) return;
+    await storageSet({ pullRescued: [] });
+
+    const box = document.createElement('div');
+    box.dataset.pybricksGitRescue = '1';
+    box.setAttribute('role', 'status');
+    box.tabIndex = 0;
+    box.textContent =
+        `The repo had its own version of ${rescued.length === 1 ? 'this file' : 'these files'}, ` +
+        `so your changes were saved alongside it: ` +
+        rescued.map((r) => `${r.path} → ${r.savedAs}`).join(', ');
+    box.title = 'Click or press Escape to dismiss';
+    box.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' || ev.key === 'Enter' || ev.key === ' ') box.remove();
+    });
+    Object.assign(box.style, {
+        position: 'fixed',
+        top: '48px',
+        right: '12px',
+        maxWidth: '360px',
+        padding: '10px 14px',
+        background: '#0d3b2e',
+        color: '#a8f0d4',
+        border: '1px solid #1c7a5c',
+        borderRadius: '4px',
+        font: 'inherit',
+        fontSize: '13px',
+        zIndex: 10000,
+        cursor: 'pointer',
+    });
+    box.addEventListener('click', () => box.remove());
+    document.body.appendChild(box);
+    setTimeout(() => box.remove(), 20000);
+}
+
+// Must match inject.js:sha256() byte-for-byte — planPull compares this against
+// the repo's hash (computed the same way in background.js), so any divergence
+// makes every pull rescue every file. Computed here instead of trusting the
+// metadata row's stored sha256, which is only as current as Pybricks' own
+// write path keeps it.
+async function sha256(text) {
+    const buf = new TextEncoder().encode(text);
+    const hash = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hash))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
 async function pull(btn) {
     const original = 'Pull';
     btn.textContent = 'Pulling…';
@@ -233,6 +291,11 @@ async function pull(btn) {
     try {
         if (!(await ensureConfigured(btn, original))) return;
 
+        // Read before the pull op, which overwrites this key on success — base
+        // must be the last state the editor and repo agreed on, not what the
+        // repo just handed us (that would make every upstream change look like
+        // an "edit" and spuriously rescue it).
+        const base = (await storageGet('lastPullShas')) ?? {};
         const result = await serverRequest('pull');
         // An empty/missing-branch pull (no head → non-empty pullWarning) returns
         // files:[]. Applying that would DELETE every file in the editor, since
@@ -248,9 +311,37 @@ async function pull(btn) {
         }
         console.log(`[pybricks-git] received ${result.files.length} file(s)`);
 
-        const summary = await pageRequest('apply-files', { files: result.files });
+        // Never hand apply-files the repo's set directly — it deletes every
+        // path it isn't given, which is how uncommitted local work used to
+        // disappear. planPull returns the full desired set: the repo's files,
+        // plus rescued copies of files genuinely edited locally, plus
+        // never-committed local files left alone.
+        const editor = await pageRequest('list-files');
+        const plan = planPull({
+            local: await Promise.all(
+                editor.contents.map(async (c) => ({
+                    path: c.path,
+                    contents: c.contents,
+                    sha: await sha256(c.contents),
+                })),
+            ),
+            repo: result.files,
+            base,
+            protectedPaths: result.protected ?? [],
+        });
+        if (plan.rescued.length) {
+            console.warn('[pybricks-git] rescued local edits:', plan.rescued);
+        }
+
+        const summary = await pageRequest('apply-files', { files: plan.files });
         console.log('[pybricks-git] applied:', summary);
         btn.textContent = `↓ +${summary.added} ~${summary.changed} -${summary.deleted}`;
+        if (plan.rescued.length) {
+            // Written only after apply-files resolves: if that op throws, the
+            // rescue never happened, and a stale key here would render a
+            // false notice on the next page load.
+            await storageSet({ pullRescued: plan.rescued });
+        }
 
         // dexie-observable doesn't see raw IDB writes, so reload to refresh
         // the React UI. Brief delay so the user can see the summary.

@@ -30,6 +30,7 @@ import {
     makeBareRepo,
     bareSubjects,
     bareFile,
+    pushCompeting,
 } from '../git-http-server.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -176,8 +177,13 @@ async function main() {
     try {
         // -- Harness: seed a bare repo and serve it -------------------------
         step(1, 'Start git harness with a seeded bare repo');
+        // keep.py / gone.py exist so the merge step (6) has files the editor
+        // provably never touched since the last Pull — the case a Pull must
+        // resolve silently in the repo's favour.
         const bare = makeBareRepo(scratch, 'team', {
             'starter.py': 'print("starter")\n',
+            'keep.py': 'print("keep")\n',
+            'gone.py': 'print("gone")\n',
         });
         server = await startGitServer(scratch);
         const repoUrl = `${server.url}/team.git`;
@@ -469,7 +475,7 @@ async function main() {
             log('no welcome tour overlay present');
         }
 
-        step(3, 'Pull: real-click, expect label "↓ +1 ~0 -0", then reload');
+        step(3, 'Pull: real-click, expect label "↓ +3 ~0 -0", then reload');
         const pullPt = await buttonRect('Pull');
         log('Pull button center:', JSON.stringify(pullPt));
         log('elementFromPoint(pull center):', await elementAt(pullPt.x, pullPt.y));
@@ -496,8 +502,8 @@ async function main() {
         evidence.labels.pull = pullLabel;
         log('pull label =', JSON.stringify(pullLabel));
         assert(
-            pullLabel === '↓ +1 ~0 -0',
-            `Pull label is "↓ +1 ~0 -0" (got "${pullLabel}")`,
+            pullLabel === '↓ +3 ~0 -0',
+            `Pull label is "↓ +3 ~0 -0" (got "${pullLabel}")`,
         );
 
         // content.js reloads ~1.5s after a non-empty apply; wait for the
@@ -602,11 +608,125 @@ async function main() {
             'starter.py still present in the bare repo (first-commit guard held)',
         );
 
+        // -- Merge on Pull ---------------------------------------------------
+        // One Pull, three outcomes: never-committed local work keeps its name,
+        // a locally edited repo file is rescued to <stem>_mine.py, and files
+        // untouched since the last Pull silently follow the repo (changed
+        // upstream -> repo's version; deleted upstream -> gone).
+        step(6, 'Merge on Pull: local work survives, untouched files follow the repo');
+        const editedStarter = 'print("starter")\n# edited locally\n';
+        // upsert-files, not apply-files: this is the kid typing in the editor,
+        // a partial write that must not delete anything.
+        const localWrite = await evalIsolated(
+            `pageRequest('upsert-files', { files: ${JSON.stringify([
+                { path: 'scratch.py', contents: 'wip = 1\n' },
+                { path: 'starter.py', contents: editedStarter },
+            ])} })`,
+        );
+        log('local edits written:', localWrite);
+        assert(
+            localWrite.added === 1 && localWrite.changed === 1,
+            `scratch.py created + starter.py edited in IndexedDB (${JSON.stringify(localWrite)})`,
+        );
+
+        const competingStarter = 'print("competing")\n';
+        const keepUpstream = 'print("keep v2")\n';
+        pushCompeting(
+            bare,
+            {
+                'starter.py': competingStarter,
+                'keep.py': keepUpstream,
+                'gone.py': null,
+            },
+            'competing change',
+        );
+        log('pushed competing change to the bare repo');
+
+        await trustedClick(await buttonRect('Pull'));
+        const mergeLabel = await poll(
+            async () => {
+                const l = await rawPull();
+                return l && /^(↓|error|setup)/.test(l) ? l : null;
+            },
+            { timeout: 30000, interval: 100, what: 'merge Pull result label' },
+        );
+        evidence.labels.mergePull = mergeLabel;
+        log('merge pull label =', JSON.stringify(mergeLabel));
+        // +1 starter_mine.py, ~starter.py ~keep.py, -gone.py; scratch.py and
+        // e2e.py unchanged. A wrong count here means the merge moved the wrong
+        // files, so assert it exactly.
+        assert(
+            mergeLabel === '↓ +1 ~2 -1',
+            `merge Pull label is "↓ +1 ~2 -1" (got "${mergeLabel}")`,
+        );
+
+        log('waiting for post-merge reload...');
+        await poll(() => isolatedCtx === null, {
+            timeout: 15000,
+            what: 'reload to clear isolated context',
+        }).catch(() => log('note: did not observe context clear (may have raced)'));
+        // Read the notice before waiting on the toolbar: it is rendered by
+        // content.js at load and self-removes after 20s.
+        const rescueText = await poll(
+            () =>
+                evalIsolated(
+                    `(() => { const n = document.querySelector('[data-pybricks-git-rescue]'); return n ? n.textContent : null; })()`,
+                    false,
+                ),
+            { timeout: 20000, interval: 250, what: 'rescue notice to render' },
+        );
+        log('rescue notice:', JSON.stringify(rescueText));
+        assert(
+            rescueText.includes('starter.py') && rescueText.includes('starter_mine.py'),
+            'rescue notice names both starter.py and starter_mine.py',
+        );
+        assert(
+            !/keep\.py/.test(rescueText),
+            'rescue notice says nothing about the untouched keep.py',
+        );
+
+        await poll(async () => (await buttonRect('Pull')) != null, {
+            timeout: 40000,
+            what: 'buttons to remount after the merge reload',
+        });
+        const afterMerge = await evalIsolated(`pageRequest('list-files')`);
+        const mergedPaths = afterMerge.contents.map((c) => c.path);
+        const mergedBy = new Map(afterMerge.contents.map((c) => [c.path, c.contents]));
+        log('editor files after merge pull:', mergedPaths);
+        assert(
+            mergedBy.get('scratch.py') === 'wip = 1\n',
+            'scratch.py (created locally, never committed) survived the Pull',
+        );
+        assert(
+            mergedBy.get('starter.py') === competingStarter,
+            "starter.py holds the repo's competing version",
+        );
+        assert(
+            mergedBy.get('starter_mine.py') === editedStarter,
+            'the local starter.py edit was rescued to starter_mine.py',
+        );
+        assert(
+            mergedBy.get('keep.py') === keepUpstream,
+            'untouched keep.py silently took the upstream version',
+        );
+        assert(
+            mergedPaths.filter((p) => p === 'keep.py').length === 1,
+            'exactly one keep.py in the editor',
+        );
+        assert(
+            !mergedPaths.some((p) => p.startsWith('keep_mine')),
+            'no keep_mine.py sibling for the untouched file',
+        );
+        assert(
+            !mergedPaths.includes('gone.py'),
+            'untouched gone.py went away with the upstream deletion',
+        );
+
         // -- Exceptions -----------------------------------------------------
         // Covers BOTH the page (content.js/inject.js) and the service worker
         // (background.js, where the git engine runs); entries are tagged
         // "page:"/"sw:" so the source is unambiguous.
-        step(6, 'Zero extension exceptions (page + service worker)');
+        step(7, 'Zero extension exceptions (page + service worker)');
         if (pageExceptions.length) {
             log(`(note: ${pageExceptions.length} non-extension page exception(s) ignored)`);
         }
@@ -623,7 +743,7 @@ async function main() {
         );
 
         // -- Screenshot -----------------------------------------------------
-        step(7, 'Capture screenshot evidence');
+        step(8, 'Capture screenshot evidence');
         const shot = await page.send('Page.captureScreenshot', { format: 'png' });
         const shotPath = join(HERE, 'toolbar.png');
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));
@@ -635,6 +755,7 @@ async function main() {
         console.log('[e2e] Pull label:      ', evidence.labels.pull);
         console.log('[e2e] Commit timeline: ', evidence.labels.commitTimeline.join('  ->  '));
         console.log('[e2e] Commit head:     ', commitLabel.trim());
+        console.log('[e2e] Merge Pull label:', evidence.labels.mergePull);
         console.log('[e2e] Assertions:');
         for (const a of evidence.assertions) console.log('       [PASS]', a.msg);
 
