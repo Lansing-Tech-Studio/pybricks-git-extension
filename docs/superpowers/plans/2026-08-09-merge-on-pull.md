@@ -732,6 +732,10 @@ Replace those two statements with:
         // plus rescued copies of anything edited locally, plus never-committed
         // local files left alone.
         const editor = await pageRequest('list-files');
+        // NOTE (corrected during execution): the `base` read below MUST happen
+        // BEFORE `serverRequest('pull')`. `pullOp` writes `lastPullShas` inside
+        // the op, so reading it afterwards hands planPull the shas of the file
+        // set the repo just delivered — making every untouched file look edited.
         const shaByPath = new Map(editor.metadata.map((m) => [m.path, m.sha256]));
         const plan = planPull({
             local: editor.contents.map((c) => ({
