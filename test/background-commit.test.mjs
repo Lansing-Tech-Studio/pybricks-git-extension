@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { setupEngine } from './engine-helpers.mjs';
 import { bareHead, bareFile, bareSubjects, pushCompeting } from './git-http-server.mjs';
 
@@ -176,6 +177,76 @@ test('an untouched file whose upstream copy was deleted stays deleted', async ()
         });
         assert.equal(result.committed, true);
         assert.throws(() => bareFile(bare, 'gone.py'));
+    } finally {
+        await server.close();
+    }
+});
+
+test('a genuine revert to the last-pulled content still commits (base moves forward after a push)', async () => {
+    const { engine, bare, server } = await setupEngine({ 'shared.py': 'v1\n' });
+    try {
+        await engine.pull(); // lastPullShas: shared.py -> sha(v1)
+        const edit = await engine.commit({
+            files: [{ path: 'shared.py', contents: 'v2\n' }],
+            message: 'edit to v2',
+        });
+        assert.equal(edit.committed, true);
+        assert.equal(bareFile(bare, 'shared.py'), 'v2\n');
+        // Undo back to exactly the pulled content. If the base were still
+        // sha(v1), the guard would wrongly treat this as untouched and drop
+        // the deliberate revert.
+        const revert = await engine.commit({
+            files: [{ path: 'shared.py', contents: 'v1\n' }],
+            message: 'revert to v1',
+        });
+        assert.equal(revert.committed, true);
+        assert.equal(bareFile(bare, 'shared.py'), 'v1\n');
+    } finally {
+        await server.close();
+    }
+});
+
+test('a newly created file gains a lastPullShas entry after commit', async () => {
+    const { engine, storage, server } = await setupEngine({ 'shared.py': 'v1\n' });
+    try {
+        await engine.pull();
+        const result = await engine.commit({
+            files: [
+                { path: 'shared.py', contents: 'v1\n' }, // untouched
+                { path: 'new.py', contents: 'x = 1\n' }, // never seen by a Pull
+            ],
+            message: 'add new file',
+        });
+        assert.equal(result.committed, true);
+        const shas = await storage.get('lastPullShas');
+        assert.equal(shas['new.py'], createHash('sha256').update('x = 1\n', 'utf8').digest('hex'));
+    } finally {
+        await server.close();
+    }
+});
+
+test('a guard-skipped path keeps its old base entry, not the tree\'s new one', async () => {
+    const { engine, bare, storage, server } = await setupEngine({
+        'shared.py': 'v1\n',
+        'mine.py': 'a = 1\n',
+    });
+    try {
+        await engine.pull();
+        const v1Sha = (await storage.get('lastPullShas'))['shared.py'];
+        pushCompeting(bare, { 'shared.py': 'v2\n' }, 'teammate edit');
+        const result = await engine.commit({
+            files: [
+                { path: 'shared.py', contents: 'v1\n' }, // stale, guard-skipped
+                { path: 'mine.py', contents: 'a = 2\n' },
+            ],
+            message: 'my edit',
+        });
+        assert.equal(result.committed, true);
+        const shas = await storage.get('lastPullShas');
+        // Base still describes v1 (what the editor and repo last agreed on),
+        // not the teammate's v2 the tree now holds — otherwise the next Pull
+        // would see local v1 against a v2 base and wrongly "rescue" it.
+        assert.equal(shas['shared.py'], v1Sha);
     } finally {
         await server.close();
     }

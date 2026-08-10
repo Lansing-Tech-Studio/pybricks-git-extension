@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { setupEngine } from './engine-helpers.mjs';
-import { bareHead, bareFile } from './git-http-server.mjs';
+import { bareHead, bareFile, pushCompeting } from './git-http-server.mjs';
 
 const MANIFEST = JSON.stringify({
     schemaVersion: 1,
@@ -344,6 +344,28 @@ test('empty-branch pull leaves lastPullManifest untouched', async () => {
         const result = await engine.pull();
         assert.notEqual(result.pullWarning, ''); // confirm this was an empty fork
         assert.deepEqual(await storage.get('lastPullManifest'), sentinel);
+    } finally {
+        await server.close();
+    }
+});
+
+test('an untouched protected file whose upstream copy changed is not reported (guard precedes the protected check)', async () => {
+    const { engine, bare, server } = await setupEngine({
+        '.pybricks-git.json': MANIFEST,
+        'menu.py': 'L1\n',
+    });
+    try {
+        await engine.pull(); // lastPullShas records menu.py's sha for L1
+        pushCompeting(bare, { 'menu.py': 'L2\n' }, 'coach update'); // upstream diverges
+        const result = await engine.commit({
+            files: [{ path: 'menu.py', contents: 'L1\n' }], // editor still holds the pulled L1
+            message: 'no real edit',
+        });
+        // A guard placed after the protected check would see L1 !== L2 and
+        // wrongly report menu.py as skipped, even though the editor never
+        // touched it. Correct placement never reaches the protected branch.
+        assert.deepEqual(result.protectedSkipped, []);
+        assert.equal(bareFile(bare, 'menu.py'), 'L2\n'); // coach's push stood
     } finally {
         await server.close();
     }

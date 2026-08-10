@@ -231,6 +231,10 @@ async function commitOp(d, msg) {
         const next = new Map(existing);
         const preserved = [];
         const protectedSkipped = [];
+        // Base-sha updates for this attempt only (reset on PushRejectedError
+        // retry, applied to storage only after this attempt's push succeeds).
+        // null means "delete this path's entry".
+        const shaUpdates = new Map();
         for (const path of existing.keys()) {
             if (!path.endsWith('.py')) continue;
             if (files.some((f) => f.path === path)) continue;
@@ -239,20 +243,20 @@ async function commitOp(d, msg) {
             if (snapshot.has(path)) {
                 // Deleting a protected file is an edit too — the tree's copy stays.
                 if (protectedPaths.has(path)) protectedSkipped.push(path);
-                else next.delete(path);
+                else {
+                    next.delete(path);
+                    shaUpdates.set(path, null);
+                }
             } else preserved.push(path);
         }
         for (const f of files) {
-            // Untouched since the last Pull: leave the tree's version alone. `next`
-            // starts as a copy of the fetched tree, so skipping preserves a
-            // teammate's newer push — and their deletion — instead of reverting it
-            // with our stale copy. A path with no lastPullShas entry is never
-            // "untouched", so newly created files still commit normally, and an
-            // absent lastPullShas disables the guard entirely (pre-upgrade installs
-            // keep today's behavior). It goes ahead of the protected check so an
-            // upstream change to a protected file the kid never edited doesn't
-            // raise a false "your version wasn't committed" notice.
-            if (pullShas && pullShas[f.path] && pullShas[f.path] === (await sha256Hex(f.contents))) {
+            const fileSha = await sha256Hex(f.contents);
+            // Skip files unchanged since the last Pull: `next` starts as a copy of the
+            // fetched tree, so skipping keeps a teammate's newer push (or deletion)
+            // instead of reverting it with our stale copy. MUST stay ahead of the
+            // protected check — otherwise an upstream change to a protected file the
+            // kid never edited raises a false "not committed" notice.
+            if (pullShas && pullShas[f.path] && pullShas[f.path] === fileSha) {
                 continue;
             }
             if (protectedPaths.has(f.path)) {
@@ -274,6 +278,7 @@ async function commitOp(d, msg) {
                 blob: new TextEncoder().encode(f.contents),
             });
             next.set(f.path, { oid, mode: '100644' });
+            shaUpdates.set(f.path, fileSha);
         }
         const newTree = await writeTreeFromMap(d, next);
         const oldTree = head
@@ -311,6 +316,18 @@ async function commitOp(d, msg) {
                 remoteRef: `refs/heads/${s.branch}`,
                 onAuth: onAuth(s),
             });
+            // Move the base forward for exactly what this commit wrote: overlaid
+            // paths get the sha we just pushed, deleted paths lose their entry.
+            // Guard-skipped and diverged-protected paths keep their old entry —
+            // the repo, not the editor, is what changed for those.
+            if (shaUpdates.size) {
+                const merged = { ...(pullShas ?? {}) };
+                for (const [path, sha] of shaUpdates) {
+                    if (sha === null) delete merged[path];
+                    else merged[path] = sha;
+                }
+                await d.storage.set({ lastPullShas: merged });
+            }
             return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved, protectedSkipped };
         } catch (err) {
             if (err && err.code === 'PushRejectedError') {
