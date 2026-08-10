@@ -266,11 +266,35 @@ bridge, and service worker — including the **snapshot-first safety rail** and 
 ## How to run
 
 ```bash
-node test/e2e/drive-splice.mjs
+PYBRICKS_LICENSE=<your block-coding licence code> node test/e2e/drive-splice.mjs
 ```
 
 Exit code `0` = PASS, non-zero = FAIL. On success it writes `splice-panel.png`
 (committed alongside this README); on failure it writes `splice-failure.png`.
+
+### `PYBRICKS_LICENSE`
+
+`code.pybricks.com` gates **block coding** behind a licence code
+or Patreon subscription (self-serve 7-day trial in the dialog; free 30-day class
+trials via `sales@pybricks.com`). Opening a block file without one pops an
+**"Enable block coding"** dialog and — the part that matters here — the editor
+then does **not** regenerate or persist the file, so the round-trip has nothing
+to assert on. Plain `.py` files are unaffected, which is why only this driver
+needs the licence: the git layer treats block files as opaque text.
+
+The driver seeds the code into `localStorage` under **`pybricks.license`** before
+the file is opened. **Never commit the code** — pass it through the environment.
+With `PYBRICKS_LICENSE` unset the driver still runs and asserts everything else;
+only STEP 9 (the editor round-trip) is skipped, and it says so.
+
+Two related facts, both cost real debugging time:
+
+- **The file tree's label centre opens Rename, not the file.** Each row carries a
+  `.pb-explorer-file-tree-action-toolbar`, and its rename button sits under the
+  label centre. Click the row's **icon gutter** (`left + 14px`) to open a file.
+- **The Explorer is a toggle that survives a reload.** After the post-Update
+  reload the app restores it already open, so clicking the toolbar button blind
+  closes it. Check for the tree first, click only if it is absent.
 
 ## What it covers
 

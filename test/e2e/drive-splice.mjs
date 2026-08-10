@@ -274,6 +274,22 @@ async function main() {
         await page.send('Page.enable');
         await page.send('Runtime.enable');
 
+        // Block coding on code.pybricks.com is licence-gated: opening a block
+        // file without one pops "Enable block coding" AND suppresses the
+        // regeneration STEP 9 asserts on. Seed the licence from the environment
+        // (never committed) so the editor opens blocks ungated; the reloads
+        // later in the run pick it up. Without it, STEP 9 skips.
+        const licence = process.env.PYBRICKS_LICENSE || '';
+        if (licence) {
+            await page.send('Runtime.evaluate', {
+                expression: `localStorage.setItem('pybricks.license', ${JSON.stringify(licence)})`,
+                returnByValue: true,
+            });
+            log('seeded block-coding licence from PYBRICKS_LICENSE');
+        } else {
+            log('PYBRICKS_LICENSE unset — the block-editor round-trip (STEP 9) will be skipped');
+        }
+
         const evalIsolated = async (expression, awaitPromise = true) => {
             const ctx = await poll(() => isolatedCtx, { timeout: 40000, what: 'isolated world context' });
             const r = await page.send('Runtime.evaluate', { expression, contextId: ctx, awaitPromise, returnByValue: true, userGesture: true });
@@ -416,23 +432,36 @@ async function main() {
         // regenerate). A regeneration that broke the setup would flip this.
         step(9, 'Editor round-trip: open prog_differs.py, assert signature stable');
         let roundTripped = false;
-        const explorerPt = await rectOf('#pb-toolbar-explorer-button');
-        if (explorerPt) {
-            await trustedClick(explorerPt);
+        if (!licence) {
+            log('SKIP: PYBRICKS_LICENSE unset — the editor will not open block files ungated');
+        } else {
+            // The Explorer is a TOGGLE and the app restores it open across the
+            // post-Update reload, so clicking blind can close it.
+            const treeUp = () => exists('[role="tree"][aria-label="Files"]');
+            if (!(await treeUp())) {
+                const explorerPt = await rectOf('#pb-toolbar-explorer-button');
+                if (explorerPt) {
+                    await trustedClick(explorerPt);
+                    await poll(treeUp, { timeout: 15000, what: 'file tree to mount' }).catch(() => null);
+                }
+            }
+            // Click the row's ICON GUTTER, not the label: each row carries a
+            // .pb-explorer-file-tree-action-toolbar whose rename button sits
+            // under the label centre, so a centre click opens Rename instead.
             const rowPt = await poll(() => evalIsolated(
-                `(() => { const rows=[...document.querySelectorAll('[role="tree"][aria-label="Files"] li[role="treeitem"]')]; const r=rows.find(li=>{const l=li.querySelector('span.bp5-tree-node-label'); return l&&l.textContent==='prog_differs.py';}); if(!r)return null; const l=r.querySelector('span.bp5-tree-node-label'); const b=l.getBoundingClientRect(); return {x:b.left+b.width/2,y:b.top+b.height/2}; })()`, false),
+                `(() => { const rows=[...document.querySelectorAll('[role="tree"][aria-label="Files"] li[role="treeitem"]')]; const r=rows.find(li=>{const l=li.querySelector('span.bp5-tree-node-label'); return l&&l.textContent==='prog_differs.py';}); if(!r)return null; const b=r.getBoundingClientRect(); return {x:b.left+14,y:b.top+b.height/2}; })()`, false),
                 { timeout: 10000, what: 'prog_differs.py row' }).catch(() => null);
             if (rowPt) { await trustedClick(rowPt); roundTripped = true; }
         }
         if (roundTripped) {
             await sleep(8000); // exceed the 4–7s regen debounce documented in blocks-format.md
-            const errShown = await evalIsolated(`!!document.querySelector('.bp5-toast, .bp5-dialog')`, false);
-            assert(!errShown, 'opening the spliced prog_differs.py raised no error toast/dialog');
+            const dialogText = await evalIsolated(`(() => { const e=document.querySelector('.bp5-toast, .bp5-dialog'); return e?e.textContent.slice(0,200):null; })()`, false);
+            assert(!dialogText, `opening the spliced prog_differs.py raised no toast/dialog (got: ${dialogText})`);
             const reread = (await evalIsolated(`pageRequest('list-files')`)).contents.find((c) => c.path === 'prog_differs.py');
             const parseOk = await evalIsolated(`(() => { const p=parseBlocksFile(${JSON.stringify(reread.contents)}); return !p.error; })()`, false);
             assert(parseOk === true, 'after editor open, prog_differs.py line-1 JSON still parses');
             assert((await sigOf(reread.contents)) === robotSig, 'after editor open+regen, prog_differs.py setup signature is unchanged (matches robot_setup.py)');
-        } else {
+        } else if (licence) {
             log('SKIP: Explorer row for prog_differs.py did not render in this environment — round-trip skipped');
         }
         evidence.roundTripped = roundTripped;

@@ -6,7 +6,7 @@ A Chrome extension that adds Git version control to [code.pybricks.com](https://
 
 Pybricks Code is a great in-browser editor, but every program lives in IndexedDB inside one browser profile on one machine. There's no version history, no way to share a starter file with a team, no way to recover yesterday's working program. This extension wraps the deployed site (without forking it) and adds a Git workflow on top: commit your current set of files to your team's GitHub repository, and pull updates from GitHub back into the editor.
 
-It works equally well for block-based programs and Python programs — block files are stored as `.py` files with their workspace JSON in a line-1 comment, so Git just sees text.
+It works equally well for block-based programs and Python programs — block files are stored as `.py` files with their workspace JSON in a line-1 comment, so Git just sees text. (Editing blocks in Pybricks itself now requires a licence *from Pybricks* — see [Known limitations](#known-limitations). This extension needs none, and Python is free.)
 
 ## Current capabilities
 
@@ -62,6 +62,7 @@ When the mentor updates the upstream shared repository, each team pulls the chan
 - **The page reloads after a Pull that changes files.** Pybricks wraps Dexie with `dexie-observable`, and the extension's raw IndexedDB writes bypass its hook system, so React doesn't see them until a reload.
 - **The credential is stored in `chrome.storage.local`.** Whether you sign in with GitHub (an OAuth token with the `public_repo` scope) or paste a PAT, it lands in `chrome.storage.local` — device-local, but readable by anyone who can use that Chrome profile. The OAuth token can be revoked any time at GitHub → *Settings → Applications*; a pasted PAT should be scoped to the single fork with Contents-only write, as in Setup.
 - **A Commit made before the first Pull preserves unknown files rather than deleting them.** Since the extension has no snapshot of what the fork contained, it won't delete starter code it has never seen. This is by design; the preserved paths are logged to the console.
+- **Block programming on code.pybricks.com requires a Pybricks licence.** This is upstream's pricing, not something this extension controls or can unlock. Opening a block file raises an **"Enable block coding"** dialog offering a licence code, a Patreon subscription, or a self-serve **7-day trial**; teachers can email `sales@pybricks.com` for a **free 30-day class trial**. Licences are per-user, so a team that builds in blocks needs coverage for the machines its students work on — worth budgeting for before a season starts. **Plain Python programs are unaffected and always free.** Pybricks Git itself needs no licence either way: it treats block files as opaque text, so Pull, Commit, and protected files work on an unlicensed machine. What a licence buys is the ability to *open and edit* those blocks in the editor — which the shared-robot-setup features assume, since students edit the spliced programs as blocks.
 
 ## Roadmap
 
