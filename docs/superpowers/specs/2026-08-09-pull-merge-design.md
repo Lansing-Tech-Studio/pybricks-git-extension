@@ -1,7 +1,7 @@
 # Merge on Pull — design
 
 Date: 2026-08-09
-Status: approved, not yet implemented
+Status: implemented on `feat/merge-on-pull` — see `docs/superpowers/plans/2026-08-09-merge-on-pull.md`
 
 ## Problem
 
@@ -144,11 +144,14 @@ never lossy.
 
 ### `content.js:pull()`
 
-Between the `pull` op and the `apply-files` call: fetch `list-files`, read
-`lastPullShas` from `chrome.storage.local` (the ISOLATED world has direct
-access), call `planPull`, and apply `files` instead of `result.files`. The
-existing `pullWarning` early return and the reload-on-change behavior are
-unchanged.
+**Read `lastPullShas` BEFORE the `pull` op**, not after — `pullOp` writes that
+key before it returns, so a later read would hand `planPull` the shas of the
+file set the repo just delivered and make every untouched file look edited
+(spurious `_mine` copies of stale versions, and upstream deletions never
+landing). Then, between the `pull` op and the `apply-files` call: fetch
+`list-files`, hash each contents row, call `planPull`, and apply `files`
+instead of `result.files`. The existing `pullWarning` early return and the
+reload-on-change behavior are unchanged.
 
 When `rescued` is non-empty, show a notice before the reload, reusing
 `showProtectedNotice`'s styling and dismiss behavior:
