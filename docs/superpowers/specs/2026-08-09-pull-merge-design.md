@@ -66,10 +66,12 @@ Locked with Brendon during design:
 over the file set the repo just handed the editor, written under the same
 `if (head)` guard that protects the existing snapshot from empty-branch pulls.
 
-`sha256` is hex SHA-256 of the contents string — the same value Pybricks stores
-on each `metadata` row and that `inject.js:sha256()` recomputes. Both sides of
-every comparison are therefore free: the repo side is hashed once at pull time,
-the local side is read off `list-files`' metadata rows.
+`sha256` is hex SHA-256 of the contents string — the same algorithm Pybricks
+uses for each `metadata` row's stored `sha256` and that `inject.js:sha256()`
+computes. The repo side is hashed once at pull time; the local side is
+recomputed in `content.js` from `list-files`' contents rather than trusted off
+the metadata row, since that stored value is only as current as Pybricks' own
+write path keeps it.
 
 `commitOp`'s deletion snapshot becomes `Object.keys(lastPullShas)`, falling back
 to `lastPullPaths` when `lastPullShas` is absent so installs that haven't pulled
@@ -90,8 +92,10 @@ One exported function:
 planPull({local, repo, base, protectedPaths}) → {files, rescued}
 ```
 
-- `local` — `[{path, contents, sha}]` from `list-files` (metadata joined to
-  contents; `sha` recomputed when a metadata row lacks `sha256`).
+- `local` — `[{path, contents, sha}]` from `list-files`; `sha` is always
+  recomputed from `contents` in `content.js` (matching `inject.js:sha256()`
+  byte-for-byte) rather than read off the metadata row's stored `sha256`,
+  since that value is only as current as Pybricks' own write path keeps it.
 - `repo` — `[{path, contents}]` from the `pull` op.
 - `base` — the `lastPullShas` map, possibly empty.
 - `protectedPaths` — the `protected` array the `pull` op already returns.

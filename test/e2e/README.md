@@ -147,8 +147,11 @@ driver's own comments use for it:
 | Commit     | `Commit` → `Committing…` → `✓ <sha> ↑` |
 | Merge Pull | `Pull` → `Pulling…` → `↓ +1 ~2 -1` → (page reloads) |
 
-`toolbar.png` (committed alongside this README) is the screenshot after the
-first push.
+`toolbar.png` (committed alongside this README) is the final screenshot,
+taken after the merge-on-pull step's reload — the toolbar buttons are back at
+their default `Commit`/`Pull` labels, and the rescue notice for the
+`starter.py` → `starter_mine.py` rescue is still on screen (it doesn't
+self-dismiss until 20s after it renders).
 
 ## Bugs found
 

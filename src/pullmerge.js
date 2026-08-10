@@ -21,11 +21,10 @@ function rescueName(path, taken) {
 // desired set for the `apply-files` op — that op deletes every path it isn't
 // given, so anything omitted here is destroyed.
 //
-//   local          [{path, contents, sha}]  the editor now; `sha` is the
-//                                           metadata row's sha256, and a
-//                                           missing one counts as edited —
-//                                           the safe direction, a spurious
-//                                           rescue rather than a silent loss
+//   local          [{path, contents, sha}]  the editor now; `sha` is a
+//                                           SHA-256 of `contents` recomputed
+//                                           by the caller, not read off
+//                                           Pybricks' stored metadata
 //   repo           [{path, contents}]       what the Pull fetched
 //   base           {path: sha}              lastPullShas: the last state the
 //                                           editor and the repo agreed on

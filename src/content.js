@@ -271,6 +271,19 @@ async function showRescueNotice() {
     setTimeout(() => box.remove(), 20000);
 }
 
+// Must match inject.js:sha256() byte-for-byte — planPull compares this against
+// the repo's hash (computed the same way in background.js), so any divergence
+// makes every pull rescue every file. Computed here instead of trusting the
+// metadata row's stored sha256, which is only as current as Pybricks' own
+// write path keeps it.
+async function sha256(text) {
+    const buf = new TextEncoder().encode(text);
+    const hash = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hash))
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('');
+}
+
 async function pull(btn) {
     const original = 'Pull';
     btn.textContent = 'Pulling…';
@@ -304,27 +317,31 @@ async function pull(btn) {
         // plus rescued copies of files genuinely edited locally, plus
         // never-committed local files left alone.
         const editor = await pageRequest('list-files');
-        const shaByPath = new Map(editor.metadata.map((m) => [m.path, m.sha256]));
         const plan = planPull({
-            local: editor.contents.map((c) => ({
-                path: c.path,
-                contents: c.contents,
-                sha: shaByPath.get(c.path),
-            })),
+            local: await Promise.all(
+                editor.contents.map(async (c) => ({
+                    path: c.path,
+                    contents: c.contents,
+                    sha: await sha256(c.contents),
+                })),
+            ),
             repo: result.files,
             base,
             protectedPaths: result.protected ?? [],
         });
         if (plan.rescued.length) {
             console.warn('[pybricks-git] rescued local edits:', plan.rescued);
-            // The reload below wipes any notice we show now, so hand it to the
-            // next page load — same trick as the menu panel's spliceReport.
-            await storageSet({ pullRescued: plan.rescued });
         }
 
         const summary = await pageRequest('apply-files', { files: plan.files });
         console.log('[pybricks-git] applied:', summary);
         btn.textContent = `↓ +${summary.added} ~${summary.changed} -${summary.deleted}`;
+        if (plan.rescued.length) {
+            // Written only after apply-files resolves: if that op throws, the
+            // rescue never happened, and a stale key here would render a
+            // false notice on the next page load.
+            await storageSet({ pullRescued: plan.rescued });
+        }
 
         // dexie-observable doesn't see raw IDB writes, so reload to refresh
         // the React UI. Brief delay so the user can see the summary.
