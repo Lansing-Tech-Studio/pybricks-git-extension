@@ -278,6 +278,11 @@ async function pull(btn) {
     try {
         if (!(await ensureConfigured(btn, original))) return;
 
+        // Read before the pull op, which overwrites this key on success — base
+        // must be the last state the editor and repo agreed on, not what the
+        // repo just handed us (that would make every upstream change look like
+        // an "edit" and spuriously rescue it).
+        const base = (await storageGet('lastPullShas')) ?? {};
         const result = await serverRequest('pull');
         // An empty/missing-branch pull (no head → non-empty pullWarning) returns
         // files:[]. Applying that would DELETE every file in the editor, since
@@ -296,8 +301,8 @@ async function pull(btn) {
         // Never hand apply-files the repo's set directly — it deletes every
         // path it isn't given, which is how uncommitted local work used to
         // disappear. planPull returns the full desired set: the repo's files,
-        // plus rescued copies of anything edited locally, plus never-committed
-        // local files left alone.
+        // plus rescued copies of files genuinely edited locally, plus
+        // never-committed local files left alone.
         const editor = await pageRequest('list-files');
         const shaByPath = new Map(editor.metadata.map((m) => [m.path, m.sha256]));
         const plan = planPull({
@@ -307,7 +312,7 @@ async function pull(btn) {
                 sha: shaByPath.get(c.path),
             })),
             repo: result.files,
-            base: (await storageGet('lastPullShas')) ?? {},
+            base,
             protectedPaths: result.protected ?? [],
         });
         if (plan.rescued.length) {
