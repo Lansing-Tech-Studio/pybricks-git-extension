@@ -100,6 +100,14 @@ async function listAllFiles(d, commitOid) {
 
 const MANIFEST_PATH = '.pybricks-git.json';
 
+// Repo infrastructure lives in dot-directories (.vscode/run_pybricks.py,
+// .github/…). The editor's file list is flat, so pulling those shows them as
+// ordinary programs next to the kid's missions. Pull hides them and Commit
+// leaves the repo's copy untouched — they're ours to carry, not to sync.
+function isRepoInternal(path) {
+    return path.split('/').some((part) => part.startsWith('.'));
+}
+
 // Reads the repo manifest (.pybricks-git.json at the root) out of an
 // already-listed tree: the protected-path set plus the menu-config file name
 // the phase-3 panel edits. Anything short of a well-formed schemaVersion-1
@@ -150,7 +158,7 @@ async function pullOp(d) {
         const all = await listAllFiles(d, head);
         manifestInfo = await readManifestInfo(d, all);
         for (const [path, entry] of all) {
-            if (!path.endsWith('.py')) continue;
+            if (!path.endsWith('.py') || isRepoInternal(path)) continue;
             const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
             files.push({ path, contents: new TextDecoder().decode(blob) });
         }
@@ -249,7 +257,10 @@ async function commitOp(d, msg) {
         // null means "delete this path's entry".
         const shaUpdates = new Map();
         for (const path of existing.keys()) {
-            if (!path.endsWith('.py')) continue;
+            // isRepoInternal: the editor was never shown these, so their absence
+            // from the payload isn't a deletion. Guards installs whose base still
+            // lists one from before Pull started hiding them.
+            if (!path.endsWith('.py') || isRepoInternal(path)) continue;
             if (files.some((f) => f.path === path)) continue;
             // Delete only what a previous Pull showed the editor; never-pulled
             // files (fresh fork starter code) are preserved.

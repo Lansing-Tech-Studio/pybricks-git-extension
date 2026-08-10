@@ -76,6 +76,22 @@ test('pull returns .py files (block files byte-exact), skips non-.py, returns th
     }
 });
 
+test('pull hides .py files under dot-directories', async () => {
+    // The editor's file list is flat, so .vscode/run_pybricks.py would sit next
+    // to the kid's missions as if it were one.
+    const { engine, server } = await setupEngine({
+        'prog.py': BLOCK,
+        '.vscode/run_pybricks.py': 'print("tooling")\n',
+    });
+    try {
+        const result = await engine.pull();
+        assert.deepEqual(result.files.map((f) => f.path), ['prog.py']);
+        assert.deepEqual(Object.keys(result.shas), ['prog.py']);
+    } finally {
+        await server.close();
+    }
+});
+
 test('pull from an empty repo warns but succeeds with no files', async () => {
     const { engine, server } = await setupEngine();
     try {

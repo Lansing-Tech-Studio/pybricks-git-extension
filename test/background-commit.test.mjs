@@ -89,6 +89,26 @@ test('non-.py files in the fork are never touched by commit', async () => {
     }
 });
 
+test('commit never deletes .py files under dot-directories', async () => {
+    // Pull hides them, so their absence from the payload is not a deletion —
+    // even for an install whose base still lists one from before that change.
+    const { engine, bare, storage, server } = await setupEngine({
+        '.vscode/run_pybricks.py': 'print("tooling")\n',
+    });
+    try {
+        await storage.set({ lastPullShas: { '.vscode/run_pybricks.py': 'stale' } });
+        const result = await engine.commit({
+            files: [{ path: 'mine.py', contents: 'a = 1\n' }],
+            message: 'add a program',
+        });
+        assert.equal(result.committed, true);
+        assert.deepEqual(result.preserved, []);
+        assert.equal(bareFile(bare, '.vscode/run_pybricks.py'), 'print("tooling")\n');
+    } finally {
+        await server.close();
+    }
+});
+
 test('commit of zero files against an empty repo is a no-op', async () => {
     const { engine, bare, server, storage } = await setupEngine();
     try {
