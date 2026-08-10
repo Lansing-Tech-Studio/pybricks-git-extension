@@ -253,10 +253,12 @@ async function commitOp(d, msg) {
             const fileSha = await sha256Hex(f.contents);
             // Skip files unchanged since the last Pull: `next` starts as a copy of the
             // fetched tree, so skipping keeps a teammate's newer push (or deletion)
-            // instead of reverting it with our stale copy. MUST stay ahead of the
-            // protected check — otherwise an upstream change to a protected file the
-            // kid never edited raises a false "not committed" notice.
-            if (pullShas && pullShas[f.path] && pullShas[f.path] === fileSha) {
+            // instead of reverting it with our stale copy. Requires `head` — with no
+            // fetched tree, `next` is empty, so skipping would drop the file instead
+            // of leaving anything standing. MUST stay ahead of the protected check —
+            // otherwise an upstream change to a protected file the kid never edited
+            // raises a false "not committed" notice.
+            if (head && pullShas && pullShas[f.path] && pullShas[f.path] === fileSha) {
                 continue;
             }
             if (protectedPaths.has(f.path)) {

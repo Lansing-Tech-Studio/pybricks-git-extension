@@ -251,3 +251,25 @@ test('a guard-skipped path keeps its old base entry, not the tree\'s new one', a
         await server.close();
     }
 });
+
+test('the guard does not fire when there is no upstream head (branch reset to empty)', async () => {
+    // The coach recreated the fork: the branch has zero commits, but a stale
+    // lastPullShas from before the reset is still in storage.
+    const { engine, bare, storage, server } = await setupEngine();
+    try {
+        const contents = 'a = 1\n';
+        await storage.set({
+            lastPullShas: { 'mine.py': createHash('sha256').update(contents, 'utf8').digest('hex') },
+        });
+        const result = await engine.commit({
+            files: [{ path: 'mine.py', contents }],
+            message: 'first commit after reset',
+        });
+        assert.equal(result.committed, true);
+        // With no fetched tree, skipping this file would leave nothing behind
+        // it — the commit must actually contain it.
+        assert.equal(bareFile(bare, 'mine.py'), contents);
+    } finally {
+        await server.close();
+    }
+});

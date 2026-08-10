@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { setupEngine } from './engine-helpers.mjs';
 import { bareHead, bareFile, pushCompeting } from './git-http-server.mjs';
 
@@ -366,6 +367,34 @@ test('an untouched protected file whose upstream copy changed is not reported (g
         // touched it. Correct placement never reaches the protected branch.
         assert.deepEqual(result.protectedSkipped, []);
         assert.equal(bareFile(bare, 'menu.py'), 'L2\n'); // coach's push stood
+    } finally {
+        await server.close();
+    }
+});
+
+test('a diverged protected path keeps its original pulled sha, not the editor\'s or the tree\'s current value', async () => {
+    const { engine, bare, storage, server } = await setupEngine({
+        '.pybricks-git.json': MANIFEST,
+        'menu.py': 'L1\n',
+        'team.py': 'x = 1\n',
+    });
+    try {
+        await engine.pull();
+        const originalSha = (await storage.get('lastPullShas'))['menu.py'];
+        pushCompeting(bare, { 'menu.py': 'L2\n' }, 'coach update'); // tree now L2
+        const result = await engine.commit({
+            files: [
+                { path: 'menu.py', contents: 'L3\n' }, // editor diverged to a third value
+                { path: 'team.py', contents: 'x = 2\n' }, // genuine change so the commit pushes
+            ],
+            message: 'sneaky menu edit plus a real one',
+        });
+        assert.equal(result.committed, true);
+        assert.deepEqual(result.protectedSkipped, ['menu.py']);
+        const shas = await storage.get('lastPullShas');
+        assert.equal(shas['menu.py'], originalSha); // still L1's sha
+        assert.notEqual(shas['menu.py'], createHash('sha256').update('L3\n', 'utf8').digest('hex'));
+        assert.notEqual(shas['menu.py'], createHash('sha256').update('L2\n', 'utf8').digest('hex'));
     } finally {
         await server.close();
     }
