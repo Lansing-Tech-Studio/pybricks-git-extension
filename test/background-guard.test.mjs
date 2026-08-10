@@ -6,12 +6,12 @@ import git from 'isomorphic-git';
 // same workaround as engine-helpers.mjs.
 import http from 'isomorphic-git/http/node/index.cjs';
 import fs from 'node:fs';
-import { setupEngine } from './engine-helpers.mjs';
+import { setupEngine, pullAndRecord } from './engine-helpers.mjs';
 import { makeEngine } from './load-background.mjs';
 import { pushCompeting, bareFile, bareSubjects } from './git-http-server.mjs';
 
 test('commit before any pull preserves never-pulled starter code', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         'starter.py': 'shared = True\n',
         'lib/shared.py': 'lib = 1\n',
     });
@@ -32,9 +32,9 @@ test('commit before any pull preserves never-pulled starter code', async () => {
 });
 
 test('after a pull, files removed from the editor are deleted by commit', async () => {
-    const { engine, bare, server } = await setupEngine({ 'starter.py': 'shared = True\n' });
+    const { engine, bare, server, storage } = await setupEngine({ 'starter.py': 'shared = True\n' });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const result = await engine.commit({
             files: [{ path: 'team.py', contents: 'ours = 1\n' }],
             message: 'deleted starter',

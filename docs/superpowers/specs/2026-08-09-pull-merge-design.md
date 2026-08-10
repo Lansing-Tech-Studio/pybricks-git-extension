@@ -144,17 +144,24 @@ never lossy.
 
 ### `content.js:pull()`
 
-**Read `lastPullShas` BEFORE the `pull` op**, not after — `pullOp` writes that
-key before it returns, so a later read would hand `planPull` the shas of the
-file set the repo just delivered and make every untouched file look edited
-(spurious `_mine` copies of stale versions, and upstream deletions never
-landing). Then, between the `pull` op and the `apply-files` call: fetch
-`list-files`, hash each contents row, call `planPull`, and apply `files`
-instead of `result.files`. The existing `pullWarning` early return and the
-reload-on-change behavior are unchanged.
+**Read `lastPullShas` BEFORE the `pull` op**, not after — a later read would
+hand `planPull` the shas of the file set the repo just delivered and make every
+untouched file look edited (spurious `_mine` copies of stale versions, and
+upstream deletions never landing). Then, between the `pull` op and the
+`apply-files` call: fetch `list-files`, hash each contents row, call `planPull`,
+and apply `files` instead of `result.files`. The existing `pullWarning` early
+return and the reload-on-change behavior are unchanged.
+
+**Write `lastPullShas` AFTER `apply-files` resolves** (superseding this doc's
+original design, where `pullOp` stored the key itself). Both that op and the
+`list-files` before it can throw — `openPybricksDb()` throws outright before the
+Pybricks DB exists — and a base advanced past an editor that never received the
+files is the same silent revert this whole document exists to stop. So `pullOp`
+returns the map as `shas` and stores nothing; `content.js` persists it next to
+`pullRescued`, once.
 
 When `rescued` is non-empty, show a notice before the reload, reusing
-`showProtectedNotice`'s styling and dismiss behavior:
+`showCommitNotice`'s styling and dismiss behavior:
 
 > Your changes to `mission2.py` were saved as `mission2_mine.py`.
 
@@ -185,6 +192,21 @@ files actually differed upstream would mean a `readBlob` per unchanged file on
 every commit — a real cost for a message nobody needs.
 
 Bonus: commits stop writing blobs for unchanged files.
+
+### The deletion pass gets the same freshness rule
+
+Guarding only the payload sharpened an asymmetry this doc originally left alone:
+deleting a file locally still wiped whatever a teammate had pushed to it. So the
+delete pass now checks the same thing the payload loop does — the tree's copy
+must still hash to our `lastPullShas` entry. When it doesn't, the file stays and
+the path is returned in `deleteSkipped`.
+
+Unlike the payload skip, this one **is** reported: a deletion is an explicit act,
+so silence would just read as a bug when the file reappears on the next Pull. The
+`readBlob` cost the payload skip refuses to pay is fine here — it is one read per
+*deleted* path, not per unchanged file. The base entry keeps its stale sha, so the
+skip repeats until a Pull hands the editor their version; advancing it would make
+the next Commit see agreement and delete for real.
 
 ## Testing
 

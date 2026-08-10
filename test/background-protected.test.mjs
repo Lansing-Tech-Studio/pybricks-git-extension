@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { setupEngine } from './engine-helpers.mjs';
+import { setupEngine, pullAndRecord } from './engine-helpers.mjs';
 import { bareHead, bareFile, pushCompeting } from './git-http-server.mjs';
 
 const MANIFEST = JSON.stringify({
@@ -10,13 +10,13 @@ const MANIFEST = JSON.stringify({
 });
 
 test('pull returns the manifest protected list and still filters files to .py', async () => {
-    const { engine, server } = await setupEngine({
+    const { engine, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'MENU = 1\n',
         'team.py': 'x = 1\n',
     });
     try {
-        const result = await engine.pull();
+        const result = await pullAndRecord(engine, storage);
         assert.deepEqual([...result.protected].sort(), ['.pybricks-git.json', 'main.py', 'menu.py']);
         // manifest is not .py, so it is never handed to the editor
         assert.deepEqual(result.files.map((f) => f.path).sort(), ['menu.py', 'team.py']);
@@ -26,9 +26,9 @@ test('pull returns the manifest protected list and still filters files to .py', 
 });
 
 test('pull with no manifest returns an empty protected list', async () => {
-    const { engine, server } = await setupEngine({ 'main.py': 'x = 1\n' });
+    const { engine, server, storage } = await setupEngine({ 'main.py': 'x = 1\n' });
     try {
-        const result = await engine.pull();
+        const result = await pullAndRecord(engine, storage);
         assert.deepEqual(result.protected, []);
     } finally {
         await server.close();
@@ -36,12 +36,12 @@ test('pull with no manifest returns an empty protected list', async () => {
 });
 
 test('pull tolerates a malformed manifest as no protection', async () => {
-    const { engine, server } = await setupEngine({
+    const { engine, server, storage } = await setupEngine({
         '.pybricks-git.json': '{not json',
         'main.py': 'x = 1\n',
     });
     try {
-        const result = await engine.pull();
+        const result = await pullAndRecord(engine, storage);
         assert.deepEqual(result.protected, []);
         assert.equal(result.files.length, 1); // pull itself still works
     } finally {
@@ -50,33 +50,33 @@ test('pull tolerates a malformed manifest as no protection', async () => {
 });
 
 test('pull ignores a manifest with the wrong schemaVersion', async () => {
-    const { engine, server } = await setupEngine({
+    const { engine, server, storage } = await setupEngine({
         '.pybricks-git.json': JSON.stringify({ schemaVersion: 2, protected: ['menu.py'] }),
         'menu.py': 'MENU = 1\n',
     });
     try {
-        assert.deepEqual((await engine.pull()).protected, []);
+        assert.deepEqual((await pullAndRecord(engine, storage)).protected, []);
     } finally {
         await server.close();
     }
 });
 
 test('pull ignores a manifest whose protected key is not an array', async () => {
-    const { engine, server } = await setupEngine({
+    const { engine, server, storage } = await setupEngine({
         '.pybricks-git.json': JSON.stringify({ schemaVersion: 1, protected: 'menu.py' }),
         'menu.py': 'MENU = 1\n',
     });
     try {
-        assert.deepEqual((await engine.pull()).protected, []);
+        assert.deepEqual((await pullAndRecord(engine, storage)).protected, []);
     } finally {
         await server.close();
     }
 });
 
 test('pull from an empty repo returns protected: []', async () => {
-    const { engine, server } = await setupEngine();
+    const { engine, server, storage } = await setupEngine();
     try {
-        const result = await engine.pull();
+        const result = await pullAndRecord(engine, storage);
         assert.notEqual(result.pullWarning, '');
         assert.deepEqual(result.protected, []);
     } finally {
@@ -85,25 +85,25 @@ test('pull from an empty repo returns protected: []', async () => {
 });
 
 test('pull drops non-string entries from the protected list', async () => {
-    const { engine, server } = await setupEngine({
+    const { engine, server, storage } = await setupEngine({
         '.pybricks-git.json': JSON.stringify({ schemaVersion: 1, protected: ['menu.py', 7, null] }),
         'menu.py': 'MENU = 1\n',
     });
     try {
-        assert.deepEqual((await engine.pull()).protected, ['menu.py']);
+        assert.deepEqual((await pullAndRecord(engine, storage)).protected, ['menu.py']);
     } finally {
         await server.close();
     }
 });
 
 test('commit keeps the tree version of an edited protected file and reports it', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'MENU = 1\n',
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const result = await engine.commit({
             files: [
                 { path: 'menu.py', contents: 'MENU = 999\n' },
@@ -121,13 +121,13 @@ test('commit keeps the tree version of an edited protected file and reports it',
 });
 
 test('commit with only protected edits is a no-op that still reports protectedSkipped', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'MENU = 1\n',
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const before = bareHead(bare);
         const result = await engine.commit({
             files: [
@@ -146,13 +146,13 @@ test('commit with only protected edits is a no-op that still reports protectedSk
 });
 
 test('an unchanged protected file in the payload is not reported', async () => {
-    const { engine, server } = await setupEngine({
+    const { engine, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'MENU = 1\n',
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const result = await engine.commit({
             files: [
                 { path: 'menu.py', contents: 'MENU = 1\n' },
@@ -168,13 +168,13 @@ test('an unchanged protected file in the payload is not reported', async () => {
 });
 
 test('deleting a protected file from the editor keeps it upstream and reports it', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'MENU = 1\n',
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull(); // menu.py enters the lastPullShas snapshot
+        await pullAndRecord(engine, storage); // menu.py enters the lastPullShas snapshot
         const result = await engine.commit({
             files: [{ path: 'team.py', contents: 'x = 2\n' }], // menu.py gone from editor
             message: 'deleted menu locally',
@@ -188,12 +188,12 @@ test('deleting a protected file from the editor keeps it upstream and reports it
 });
 
 test('a protected path that is not upstream is never created', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const result = await engine.commit({
             files: [
                 { path: 'menu.py', contents: 'MENU = 999\n' }, // protected, absent upstream
@@ -210,9 +210,9 @@ test('a protected path that is not upstream is never created', async () => {
 });
 
 test('without a manifest, edits to any file commit normally with empty protectedSkipped', async () => {
-    const { engine, bare, server } = await setupEngine({ 'menu.py': 'MENU = 1\n' });
+    const { engine, bare, server, storage } = await setupEngine({ 'menu.py': 'MENU = 1\n' });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const result = await engine.commit({
             files: [{ path: 'menu.py', contents: 'MENU = 2\n' }],
             message: 'no manifest, no protection',
@@ -226,17 +226,17 @@ test('without a manifest, edits to any file commit normally with empty protected
 });
 
 test('pull after a skipped protected edit hands the editor the tree version back', async () => {
-    const { engine, server } = await setupEngine({
+    const { engine, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'MENU = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         await engine.commit({
             files: [{ path: 'menu.py', contents: 'MENU = 999\n' }],
             message: 'sneaky edit',
         });
-        const result = await engine.pull(); // pull overwrites the editor — restore is free
+        const result = await pullAndRecord(engine, storage); // pull overwrites the editor — restore is free
         const menu = result.files.find((f) => f.path === 'menu.py');
         assert.equal(menu.contents, 'MENU = 1\n');
     } finally {
@@ -245,7 +245,7 @@ test('pull after a skipped protected edit hands the editor the tree version back
 });
 
 test('commit of zero files against an empty repo returns protectedSkipped: []', async () => {
-    const { engine, server } = await setupEngine();
+    const { engine, server, storage } = await setupEngine();
     try {
         const result = await engine.commit({ files: [], message: '' });
         assert.equal(result.committed, false);
@@ -266,7 +266,7 @@ test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullSh
         'a.py': 'x = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const stored = await storage.get('lastPullManifest');
         assert.deepEqual(stored, {
             protected: ['menu.py'],
@@ -283,7 +283,7 @@ test('pull stores lastPullManifest (protected + menuConfig) alongside lastPullSh
 test('pull with no manifest stores empty lastPullManifest', async () => {
     const { engine, storage, server } = await setupEngine({ 'main.py': 'x = 1\n' });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const stored = await storage.get('lastPullManifest');
         assert.deepEqual(stored, {
             protected: [],
@@ -308,7 +308,7 @@ test('pull stores setupTemplate/teamSetup from the manifest', async () => {
         'menu.py': 'MENU = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const stored = await storage.get('lastPullManifest');
         assert.equal(stored.setupTemplate, 'robot_setup_template.py');
         assert.equal(stored.teamSetup, 'robot_setup.py');
@@ -328,7 +328,7 @@ test('missing/non-string setupTemplate/teamSetup stored as null', async () => {
         'menu.py': 'MENU = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const stored = await storage.get('lastPullManifest');
         assert.equal(stored.setupTemplate, null);
         assert.equal(stored.teamSetup, null);
@@ -342,7 +342,7 @@ test('empty-branch pull leaves lastPullManifest untouched', async () => {
     try {
         const sentinel = { protected: ['keep.py'], menuConfig: 'menu_config.py' };
         await storage.set({ lastPullManifest: sentinel });
-        const result = await engine.pull();
+        const result = await pullAndRecord(engine, storage);
         assert.notEqual(result.pullWarning, ''); // confirm this was an empty fork
         assert.deepEqual(await storage.get('lastPullManifest'), sentinel);
     } finally {
@@ -351,12 +351,12 @@ test('empty-branch pull leaves lastPullManifest untouched', async () => {
 });
 
 test('an untouched protected file whose upstream copy changed is not reported (guard precedes the protected check)', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'L1\n',
     });
     try {
-        await engine.pull(); // lastPullShas records menu.py's sha for L1
+        await pullAndRecord(engine, storage); // lastPullShas records menu.py's sha for L1
         pushCompeting(bare, { 'menu.py': 'L2\n' }, 'coach update'); // upstream diverges
         const result = await engine.commit({
             files: [{ path: 'menu.py', contents: 'L1\n' }], // editor still holds the pulled L1
@@ -379,7 +379,7 @@ test('a diverged protected path keeps its original pulled sha, not the editor\'s
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const originalSha = (await storage.get('lastPullShas'))['menu.py'];
         pushCompeting(bare, { 'menu.py': 'L2\n' }, 'coach update'); // tree now L2
         const result = await engine.commit({
@@ -403,14 +403,14 @@ test('a diverged protected path keeps its original pulled sha, not the editor\'s
 test('one commit mixing a protected deletion and a divergent protected edit reports both', async () => {
     // (deferred from phase 2) menu.py + main.py are both protected. One commit
     // omits menu.py (deletion attempt) and edits main.py (divergent edit).
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         '.pybricks-git.json': MANIFEST,
         'menu.py': 'MENU = 1\n',
         'main.py': 'MAIN = 1\n',
         'team.py': 'x = 1\n',
     });
     try {
-        await engine.pull(); // both protected paths enter the lastPullShas snapshot
+        await pullAndRecord(engine, storage); // both protected paths enter the lastPullShas snapshot
         const result = await engine.commit({
             files: [
                 { path: 'main.py', contents: 'MAIN = 999\n' }, // divergent protected edit

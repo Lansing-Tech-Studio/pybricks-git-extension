@@ -1,13 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { setupEngine } from './engine-helpers.mjs';
+import { setupEngine, pullAndRecord } from './engine-helpers.mjs';
 import { bareHead, bareFile, bareSubjects, pushCompeting } from './git-http-server.mjs';
 
 const BLOCK = '# pybricks blocks file:{"a":1,"b":[2,3]}\nfrom pybricks import *\n';
 
 test('first commit to an empty fork creates the branch and pushes', async () => {
-    const { engine, bare, server } = await setupEngine();
+    const { engine, bare, server, storage } = await setupEngine();
     try {
         const result = await engine.commit({
             files: [{ path: 'main.py', contents: 'print(1)\n' }],
@@ -25,7 +25,7 @@ test('first commit to an empty fork creates the branch and pushes', async () => 
 });
 
 test('empty message gets the timestamped default', async () => {
-    const { engine, bare, server } = await setupEngine();
+    const { engine, bare, server, storage } = await setupEngine();
     try {
         const result = await engine.commit({
             files: [{ path: 'main.py', contents: 'x=1\n' }],
@@ -39,7 +39,7 @@ test('empty message gets the timestamped default', async () => {
 });
 
 test('identical second commit is a no-op that does not push', async () => {
-    const { engine, bare, server } = await setupEngine();
+    const { engine, bare, server, storage } = await setupEngine();
     try {
         const files = [{ path: 'main.py', contents: 'x=1\n' }];
         await engine.commit({ files, message: 'one' });
@@ -54,7 +54,7 @@ test('identical second commit is a no-op that does not push', async () => {
 });
 
 test('nested paths and block files round-trip byte-for-byte through commit', async () => {
-    const { engine, bare, server } = await setupEngine();
+    const { engine, bare, server, storage } = await setupEngine();
     try {
         await engine.commit({
             files: [
@@ -71,12 +71,12 @@ test('nested paths and block files round-trip byte-for-byte through commit', asy
 });
 
 test('non-.py files in the fork are never touched by commit', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         'README.md': '# shared docs\n',
         'main.py': 'print(1)\n',
     });
     try {
-        await engine.pull(); // snapshot main.py so its deletion is allowed
+        await pullAndRecord(engine, storage); // snapshot main.py so its deletion is allowed
         await engine.commit({
             files: [{ path: 'other.py', contents: 'z=1\n' }],
             message: 'replace',
@@ -90,7 +90,7 @@ test('non-.py files in the fork are never touched by commit', async () => {
 });
 
 test('commit of zero files against an empty repo is a no-op', async () => {
-    const { engine, bare, server } = await setupEngine();
+    const { engine, bare, server, storage } = await setupEngine();
     try {
         const result = await engine.commit({ files: [], message: '' });
         assert.equal(result.committed, false);
@@ -120,13 +120,13 @@ test('commit falls back to lastPullPaths when lastPullShas is absent', async () 
 });
 
 test('a stale untouched file does not revert a teammate\'s push', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         'shared.py': 'v1\n',
         'mine.py': 'a = 1\n',
     });
     try {
         // Pull records shas for v1 of both files.
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         // A teammate pushes a newer shared.py while our editor still holds v1.
         pushCompeting(bare, { 'shared.py': 'v2\n' }, 'teammate edit');
         // We commit our own edit; our payload still carries the stale shared.py.
@@ -145,10 +145,32 @@ test('a stale untouched file does not revert a teammate\'s push', async () => {
     }
 });
 
-test('an edited file still overwrites the tree version', async () => {
-    const { engine, bare, server } = await setupEngine({ 'shared.py': 'v1\n' });
+test('a pull that never reached the editor does not advance the base', async () => {
+    // content.js applies a Pull in two steps that can both throw (openPybricksDb
+    // throws outright before the Pybricks DB exists). If the engine advanced the
+    // base on its own, a failed apply would leave base = repo, editor = stale —
+    // and the very next Commit would push the stale copy over a teammate's work,
+    // the exact revert the untouched-skip guard exists to prevent.
+    const { engine, bare, storage, server } = await setupEngine({ 'shared.py': 'v1\n' });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage); // pull 1 reached the editor
+        pushCompeting(bare, { 'shared.py': 'v2\n' }, 'teammate edit');
+        await engine.pull(); // pull 2 fetched v2, but the editor write threw
+        const result = await engine.commit({
+            files: [{ path: 'shared.py', contents: 'v1\n' }], // editor still holds v1
+            message: 'my edit',
+        });
+        assert.equal(bareFile(bare, 'shared.py'), 'v2\n'); // theirs survived
+        assert.equal(result.committed, false);
+    } finally {
+        await server.close();
+    }
+});
+
+test('an edited file still overwrites the tree version', async () => {
+    const { engine, bare, server, storage } = await setupEngine({ 'shared.py': 'v1\n' });
+    try {
+        await pullAndRecord(engine, storage);
         const result = await engine.commit({
             files: [{ path: 'shared.py', contents: 'v1 edited\n' }],
             message: 'genuine edit',
@@ -161,12 +183,12 @@ test('an edited file still overwrites the tree version', async () => {
 });
 
 test('an untouched file whose upstream copy was deleted stays deleted', async () => {
-    const { engine, bare, server } = await setupEngine({
+    const { engine, bare, server, storage } = await setupEngine({
         'gone.py': 'v1\n',
         'mine.py': 'a = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         pushCompeting(bare, { 'gone.py': null }, 'teammate deleted it');
         const result = await engine.commit({
             files: [
@@ -182,10 +204,56 @@ test('an untouched file whose upstream copy was deleted stays deleted', async ()
     }
 });
 
-test('a genuine revert to the last-pulled content still commits (base moves forward after a push)', async () => {
-    const { engine, bare, server } = await setupEngine({ 'shared.py': 'v1\n' });
+test('deleting a file a teammate has since changed keeps their version', async () => {
+    // Deletions used to skip the freshness check the payload files get, so
+    // removing a file locally wiped whatever a teammate had pushed to it.
+    const { engine, bare, storage, server } = await setupEngine({
+        'shared.py': 'v1\n',
+        'mine.py': 'a = 1\n',
+    });
     try {
-        await engine.pull(); // lastPullShas: shared.py -> sha(v1)
+        await pullAndRecord(engine, storage);
+        pushCompeting(bare, { 'shared.py': 'v2\n' }, 'teammate edit');
+        const result = await engine.commit({
+            files: [{ path: 'mine.py', contents: 'a = 2\n' }], // shared.py deleted locally
+            message: 'delete shared',
+        });
+        assert.equal(result.committed, true);
+        assert.equal(bareFile(bare, 'shared.py'), 'v2\n');
+        assert.deepEqual(result.deleteSkipped, ['shared.py']);
+        assert.equal(bareFile(bare, 'mine.py'), 'a = 2\n'); // the rest of the commit landed
+    } finally {
+        await server.close();
+    }
+});
+
+test('a skipped deletion is still skipped on the next commit, not just the first', async () => {
+    // The skip must hold until a Pull actually shows the kid the teammate's
+    // version. Advancing the base to the tree's sha on the skip would make the
+    // very next Commit see agreement again and delete the file for real.
+    const { engine, bare, storage, server } = await setupEngine({
+        'shared.py': 'v1\n',
+        'mine.py': 'a = 1\n',
+    });
+    try {
+        await pullAndRecord(engine, storage);
+        pushCompeting(bare, { 'shared.py': 'v2\n' }, 'teammate edit');
+        await engine.commit({ files: [{ path: 'mine.py', contents: 'a = 2\n' }], message: 'one' });
+        const second = await engine.commit({
+            files: [{ path: 'mine.py', contents: 'a = 3\n' }],
+            message: 'two',
+        });
+        assert.equal(bareFile(bare, 'shared.py'), 'v2\n');
+        assert.deepEqual(second.deleteSkipped, ['shared.py']);
+    } finally {
+        await server.close();
+    }
+});
+
+test('a genuine revert to the last-pulled content still commits (base moves forward after a push)', async () => {
+    const { engine, bare, server, storage } = await setupEngine({ 'shared.py': 'v1\n' });
+    try {
+        await pullAndRecord(engine, storage); // lastPullShas: shared.py -> sha(v1)
         const edit = await engine.commit({
             files: [{ path: 'shared.py', contents: 'v2\n' }],
             message: 'edit to v2',
@@ -209,7 +277,7 @@ test('a genuine revert to the last-pulled content still commits (base moves forw
 test('a newly created file gains a lastPullShas entry after commit', async () => {
     const { engine, storage, server } = await setupEngine({ 'shared.py': 'v1\n' });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const result = await engine.commit({
             files: [
                 { path: 'shared.py', contents: 'v1\n' }, // untouched
@@ -231,7 +299,7 @@ test('a guard-skipped path keeps its old base entry, not the tree\'s new one', a
         'mine.py': 'a = 1\n',
     });
     try {
-        await engine.pull();
+        await pullAndRecord(engine, storage);
         const v1Sha = (await storage.get('lastPullShas'))['shared.py'];
         pushCompeting(bare, { 'shared.py': 'v2\n' }, 'teammate edit');
         const result = await engine.commit({

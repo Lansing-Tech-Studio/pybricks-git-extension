@@ -179,11 +179,15 @@ async function main() {
         step(1, 'Start git harness with a seeded bare repo');
         // keep.py / gone.py exist so the merge step (6) has files the editor
         // provably never touched since the last Pull — the case a Pull must
-        // resolve silently in the repo's favour.
+        // resolve silently in the repo's favour. coach.py plus the manifest give
+        // step 6 a protected file: the repo's version wins with no rescue copy,
+        // a branch that was unit-test-only until this repo grew a manifest.
         const bare = makeBareRepo(scratch, 'team', {
             'starter.py': 'print("starter")\n',
             'keep.py': 'print("keep")\n',
             'gone.py': 'print("gone")\n',
+            'coach.py': 'print("coach")\n',
+            '.pybricks-git.json': '{"schemaVersion":1,"protected":["coach.py"]}\n',
         });
         server = await startGitServer(scratch);
         const repoUrl = `${server.url}/team.git`;
@@ -475,7 +479,7 @@ async function main() {
             log('no welcome tour overlay present');
         }
 
-        step(3, 'Pull: real-click, expect label "↓ +3 ~0 -0", then reload');
+        step(3, 'Pull: real-click, expect label "↓ +4 ~0 -0", then reload');
         const pullPt = await buttonRect('Pull');
         log('Pull button center:', JSON.stringify(pullPt));
         log('elementFromPoint(pull center):', await elementAt(pullPt.x, pullPt.y));
@@ -502,8 +506,8 @@ async function main() {
         evidence.labels.pull = pullLabel;
         log('pull label =', JSON.stringify(pullLabel));
         assert(
-            pullLabel === '↓ +3 ~0 -0',
-            `Pull label is "↓ +3 ~0 -0" (got "${pullLabel}")`,
+            pullLabel === '↓ +4 ~0 -0',
+            `Pull label is "↓ +4 ~0 -0" (got "${pullLabel}")`,
         );
 
         // content.js reloads ~1.5s after a non-empty apply; wait for the
@@ -621,21 +625,24 @@ async function main() {
             `pageRequest('upsert-files', { files: ${JSON.stringify([
                 { path: 'scratch.py', contents: 'wip = 1\n' },
                 { path: 'starter.py', contents: editedStarter },
+                { path: 'coach.py', contents: 'print("coach")\n# kid poked at it\n' },
             ])} })`,
         );
         log('local edits written:', localWrite);
         assert(
-            localWrite.added === 1 && localWrite.changed === 1,
-            `scratch.py created + starter.py edited in IndexedDB (${JSON.stringify(localWrite)})`,
+            localWrite.added === 1 && localWrite.changed === 2,
+            `scratch.py created + starter.py/coach.py edited in IndexedDB (${JSON.stringify(localWrite)})`,
         );
 
         const competingStarter = 'print("competing")\n';
         const keepUpstream = 'print("keep v2")\n';
+        const coachUpstream = 'print("coach v2")\n';
         pushCompeting(
             bare,
             {
                 'starter.py': competingStarter,
                 'keep.py': keepUpstream,
+                'coach.py': coachUpstream,
                 'gone.py': null,
             },
             'competing change',
@@ -652,12 +659,12 @@ async function main() {
         );
         evidence.labels.mergePull = mergeLabel;
         log('merge pull label =', JSON.stringify(mergeLabel));
-        // +1 starter_mine.py, ~starter.py ~keep.py, -gone.py; scratch.py and
-        // e2e.py unchanged. A wrong count here means the merge moved the wrong
+        // +1 starter_mine.py, ~starter.py ~keep.py ~coach.py, -gone.py; scratch.py
+        // and e2e.py unchanged. A wrong count here means the merge moved the wrong
         // files, so assert it exactly.
         assert(
-            mergeLabel === '↓ +1 ~2 -1',
-            `merge Pull label is "↓ +1 ~2 -1" (got "${mergeLabel}")`,
+            mergeLabel === '↓ +1 ~3 -1',
+            `merge Pull label is "↓ +1 ~3 -1" (got "${mergeLabel}")`,
         );
 
         log('waiting for post-merge reload...');
@@ -683,6 +690,10 @@ async function main() {
         assert(
             !/keep\.py/.test(rescueText),
             'rescue notice says nothing about the untouched keep.py',
+        );
+        assert(
+            !/coach\.py/.test(rescueText),
+            'rescue notice says nothing about the protected coach.py (overwritten, never rescued)',
         );
 
         await poll(async () => (await buttonRect('Pull')) != null, {
@@ -721,12 +732,85 @@ async function main() {
             !mergedPaths.includes('gone.py'),
             'untouched gone.py went away with the upstream deletion',
         );
+        assert(
+            mergedBy.get('coach.py') === coachUpstream,
+            "the protected coach.py took the repo's version despite the local edit",
+        );
+        assert(
+            !mergedPaths.some((p) => p.startsWith('coach_mine')),
+            'a protected file is overwritten with no rescue copy',
+        );
+
+        // -- Deleting a file a teammate has since changed ---------------------
+        // The mirror image of the guard step 6 covers: a local deletion is only
+        // ours to push while the repo still holds what our last Pull showed us.
+        step(7, 'Commit: a locally deleted file a teammate changed is kept, with a notice');
+        const keepUpstream2 = 'print("keep v3")\n';
+        pushCompeting(bare, { 'keep.py': keepUpstream2 }, 'teammate touches keep.py again');
+        // apply-files with keep.py withheld is how a deletion reaches IndexedDB.
+        const survivors = (await evalIsolated(`pageRequest('list-files')`)).contents
+            .filter((c) => c.path !== 'keep.py')
+            .map((c) => ({ path: c.path, contents: c.contents }));
+        const deleteSummary = await evalIsolated(
+            `pageRequest('apply-files', { files: ${JSON.stringify(survivors)} })`,
+        );
+        assert(
+            deleteSummary.deleted === 1,
+            `keep.py removed from IndexedDB (${JSON.stringify(deleteSummary)})`,
+        );
+
+        await trustedClick(await buttonRect('Commit'));
+        await poll(
+            () => evalIsolated(`!!document.querySelector('[data-pybricks-git-msg]')`, false),
+            { timeout: 10000, what: 'commit message input to appear' },
+        );
+        await page.send('Input.insertText', { text: 'delete keep.py' });
+        for (const type of ['keyDown', 'keyUp']) {
+            await page.send('Input.dispatchKeyEvent', {
+                type,
+                windowsVirtualKeyCode: 13,
+                key: 'Enter',
+                code: 'Enter',
+            });
+        }
+        const deleteLabel = await poll(
+            async () => {
+                const l = await buttonLabel(['Committing', '✓', 'no changes', 'error']);
+                return l && (/^✓ [0-9a-f]{7} ↑$/.test(l.trim()) || l === 'error' || l === 'no changes')
+                    ? l
+                    : null;
+            },
+            { timeout: 40000, interval: 100, what: 'delete Commit result label' },
+        );
+        evidence.labels.deleteCommit = deleteLabel;
+        log('delete commit label =', JSON.stringify(deleteLabel));
+        assert(
+            /^✓ [0-9a-f]{7} ↑$/.test(deleteLabel.trim()),
+            `delete commit pushed (got "${deleteLabel}")`,
+        );
+        assert(
+            bareFile(bare, 'keep.py') === keepUpstream2,
+            "the teammate's keep.py survived a local deletion it never saw",
+        );
+        const deleteNotice = await poll(
+            () =>
+                evalIsolated(
+                    `(() => { const n = document.querySelector('[data-pybricks-git-notice]'); return n ? n.textContent : null; })()`,
+                    false,
+                ),
+            { timeout: 15000, interval: 250, what: 'skipped-deletion notice to render' },
+        );
+        log('delete-skip notice:', JSON.stringify(deleteNotice));
+        assert(
+            /keep\.py/.test(deleteNotice),
+            'the skipped deletion is reported to the kid by name',
+        );
 
         // -- Exceptions -----------------------------------------------------
         // Covers BOTH the page (content.js/inject.js) and the service worker
         // (background.js, where the git engine runs); entries are tagged
         // "page:"/"sw:" so the source is unambiguous.
-        step(7, 'Zero extension exceptions (page + service worker)');
+        step(8, 'Zero extension exceptions (page + service worker)');
         if (pageExceptions.length) {
             log(`(note: ${pageExceptions.length} non-extension page exception(s) ignored)`);
         }
@@ -743,7 +827,7 @@ async function main() {
         );
 
         // -- Screenshot -----------------------------------------------------
-        step(8, 'Capture screenshot evidence');
+        step(9, 'Capture screenshot evidence');
         const shot = await page.send('Page.captureScreenshot', { format: 'png' });
         const shotPath = join(HERE, 'toolbar.png');
         writeFileSync(shotPath, Buffer.from(shot.data, 'base64'));

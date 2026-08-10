@@ -19,6 +19,15 @@ export function memStorage() {
     };
 }
 
+// What content.js does after a Pull: record the returned base snapshot, but
+// only once the editor write has landed. The engine deliberately does NOT
+// store it (see pullOp), so any test that needs a base must go through here.
+export async function pullAndRecord(engine, storage) {
+    const result = await engine.pull();
+    if (result.shas) await storage.set({ lastPullShas: result.shas });
+    return result;
+}
+
 // Spins up a served bare repo (optionally seeded) plus an engine pointed at it.
 export async function setupEngine(files = {}) {
     const root = mkdtempSync(join(tmpdir(), 'pbgit-engine-'));

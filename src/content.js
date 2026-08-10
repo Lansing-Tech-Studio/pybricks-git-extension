@@ -178,8 +178,23 @@ async function commit(btn, message) {
                 result.preserved,
             );
         }
+        // Both notices share one slot, so report the protected files last: a kid
+        // who edits a coach file needs that explained more than a stale deletion.
+        if (result.deleteSkipped && result.deleteSkipped.length) {
+            const one = result.deleteSkipped.length === 1;
+            showCommitNotice(
+                `${result.deleteSkipped.join(', ')} ${one ? 'was' : 'were'} changed by a teammate ` +
+                    `since your last Pull, so ${one ? "it wasn't" : "they weren't"} deleted. ` +
+                    `Pull to see their version.`,
+            );
+        }
         if (result.protectedSkipped && result.protectedSkipped.length) {
-            showProtectedNotice(result.protectedSkipped);
+            const one = result.protectedSkipped.length === 1;
+            showCommitNotice(
+                `${result.protectedSkipped.join(', ')} ${one ? 'is' : 'are'} managed by your coach's repo, ` +
+                    `so your ${one ? "version wasn't" : "versions weren't"} committed. ` +
+                    `Pull to match the repo.`,
+            );
         }
         const label = result.committed ? `✓ ${result.head}` : 'no changes';
         btn.textContent = label + (result.pushed ? ' ↑' : '');
@@ -193,20 +208,16 @@ async function commit(btn, message) {
     }
 }
 
-// Kid-facing warning for commits that tried to change coach-managed files.
-// The engine kept the repo's version; the editor still shows the local edit
-// until the next Pull. Click or the timeout dismisses it.
-function showProtectedNotice(paths) {
+// Kid-facing warning about work a Commit deliberately did not push: coach-managed
+// files it wouldn't change, and deletions it wouldn't apply over a teammate's
+// newer edit. Only one is shown at a time. Click or the timeout dismisses it.
+function showCommitNotice(text) {
     document.querySelector('[data-pybricks-git-notice]')?.remove();
-    const one = paths.length === 1;
     const box = document.createElement('div');
     box.dataset.pybricksGitNotice = '1';
     box.setAttribute('role', 'status');
     box.tabIndex = 0;
-    box.textContent =
-        `${paths.join(', ')} ${one ? 'is' : 'are'} managed by your coach's repo, ` +
-        `so your ${one ? 'version wasn\'t' : 'versions weren\'t'} committed. ` +
-        `Pull to match the repo.`;
+    box.textContent = text;
     box.title = 'Click or press Escape to dismiss';
     box.addEventListener('keydown', (ev) => {
         if (ev.key === 'Escape' || ev.key === 'Enter' || ev.key === ' ') box.remove();
@@ -336,12 +347,13 @@ async function pull(btn) {
         const summary = await pageRequest('apply-files', { files: plan.files });
         console.log('[pybricks-git] applied:', summary);
         btn.textContent = `↓ +${summary.added} ~${summary.changed} -${summary.deleted}`;
-        if (plan.rescued.length) {
-            // Written only after apply-files resolves: if that op throws, the
-            // rescue never happened, and a stale key here would render a
-            // false notice on the next page load.
-            await storageSet({ pullRescued: plan.rescued });
-        }
+        // Both keys are written only after apply-files resolves. The base must
+        // never claim agreement the editor doesn't hold: if the apply throws,
+        // the editor is still on the old files, and an advanced base would let
+        // the next Commit push them over whatever the repo now has. A stale
+        // pullRescued would likewise render a false notice on the next load.
+        await storageSet({ lastPullShas: result.shas });
+        if (plan.rescued.length) await storageSet({ pullRescued: plan.rescued });
 
         // dexie-observable doesn't see raw IDB writes, so reload to refresh
         // the React UI. Brief delay so the user can see the summary.

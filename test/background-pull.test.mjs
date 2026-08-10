@@ -47,7 +47,7 @@ test('status reports unconfigured when settings are missing', async () => {
     }
 });
 
-test('pull returns .py files (block files byte-exact), skips non-.py, records snapshot', async () => {
+test('pull returns .py files (block files byte-exact), skips non-.py, returns the base snapshot', async () => {
     const { engine, storage, server } = await setupEngine({
         'prog.py': BLOCK,
         'lib/util.py': 'def f(): pass\n',
@@ -60,15 +60,17 @@ test('pull returns .py files (block files byte-exact), skips non-.py, records sn
         const byPath = Object.fromEntries(result.files.map((f) => [f.path, f.contents]));
         assert.deepEqual(Object.keys(byPath).sort(), ['lib/util.py', 'prog.py']);
         assert.equal(byPath['prog.py'], BLOCK);
-        const shas = await storage.get('lastPullShas');
-        assert.deepEqual(Object.keys(shas).sort(), ['lib/util.py', 'prog.py']);
+        assert.deepEqual(Object.keys(result.shas).sort(), ['lib/util.py', 'prog.py']);
         // Hex sha256 of the exact contents string — the same value Pybricks
         // stores on each metadata row, so the two sides compare directly.
-        assert.match(shas['prog.py'], /^[0-9a-f]{64}$/);
+        assert.match(result.shas['prog.py'], /^[0-9a-f]{64}$/);
         assert.equal(
-            shas['prog.py'],
+            result.shas['prog.py'],
             createHash('sha256').update(BLOCK, 'utf8').digest('hex'),
         );
+        // Returned, not stored: only content.js may advance the base, and only
+        // once apply-files has actually put these files in the editor.
+        assert.equal(await storage.get('lastPullShas'), undefined);
     } finally {
         await server.close();
     }
@@ -85,9 +87,9 @@ test('pull from an empty repo warns but succeeds with no files', async () => {
     }
 });
 
-test('pull from an empty repo does NOT clobber a prior lastPullShas snapshot', async () => {
-    // An empty/missing-branch pull shows the editor nothing, so it must not
-    // overwrite the last-Pull snapshot with {}. Otherwise the next Commit would
+test('pull from an empty repo offers no snapshot to replace the last one with', async () => {
+    // An empty/missing-branch pull shows the editor nothing, so it must not hand
+    // back an empty base for content.js to store. Otherwise the next Commit would
     // treat every previously-tracked path as "known" and delete it. (The empty
     // list is also never applied to the editor — see content.js pull().)
     const { engine, storage, server } = await setupEngine();
@@ -96,6 +98,7 @@ test('pull from an empty repo does NOT clobber a prior lastPullShas snapshot', a
         const result = await engine.pull();
         assert.equal(result.files.length, 0);
         assert.notEqual(result.pullWarning, '');
+        assert.equal(result.shas, null);
         assert.deepEqual(await storage.get('lastPullShas'), { 'keep.py': 'deadbeef' });
     } finally {
         await server.close();

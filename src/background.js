@@ -155,16 +155,17 @@ async function pullOp(d) {
             files.push({ path, contents: new TextDecoder().decode(blob) });
         }
     }
-    // Only update the snapshot when the editor was actually shown a file set.
-    // An empty/missing-branch pull applies nothing (content.js skips it), so
-    // clobbering lastPullShas to {} here would make the next Commit treat every
-    // previously-tracked path as known and delete it. lastPullManifest follows
-    // the same guard so an empty-branch pull leaves the last real snapshot intact.
+    // The base snapshot is RETURNED, never stored here: it may only advance once
+    // the editor actually holds these files, and the apply happens later, in
+    // content.js, where it can throw. Storing it here would leave base = repo,
+    // editor = stale, and the next Commit would push the stale copy over a
+    // teammate's work. lastPullManifest is safe to store — it describes the repo,
+    // not what the editor and the repo agree on.
+    //
+    // Both are skipped with no head: an empty/missing-branch pull applies nothing
+    // (content.js returns early on pullWarning), so the last real snapshot stands.
     if (head) {
         await d.storage.set({
-            lastPullShas: Object.fromEntries(
-                await Promise.all(files.map(async (f) => [f.path, await sha256Hex(f.contents)])),
-            ),
             lastPullManifest: {
                 protected: [...manifestInfo.protected],
                 menuConfig: manifestInfo.menuConfig,
@@ -178,6 +179,11 @@ async function pullOp(d) {
         files,
         protected: [...manifestInfo.protected],
         pullWarning: head ? '' : 'remote repository has no commits yet',
+        shas: head
+            ? Object.fromEntries(
+                  await Promise.all(files.map(async (f) => [f.path, await sha256Hex(f.contents)])),
+              )
+            : null,
     };
 }
 
@@ -210,6 +216,12 @@ async function writeTreeFromMap(d, fileMap) {
     return writeDir(root);
 }
 
+// sha256 of a tree entry's contents, in the same hex form as lastPullShas.
+async function entrySha(d, entry) {
+    const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
+    return sha256Hex(new TextDecoder().decode(blob));
+}
+
 async function commitOp(d, msg) {
     const files = msg.files ?? [];
     const s = await getSettings(d);
@@ -224,13 +236,14 @@ async function commitOp(d, msg) {
     for (let attempt = 0; attempt < 3; attempt++) {
         const head = await fetchRemoteHead(d, s);
         if (!head && files.length === 0) {
-            return { committed: false, head: '', message: 'no changes', pushed: false, preserved: [], protectedSkipped: [] };
+            return { committed: false, head: '', message: 'no changes', pushed: false, preserved: [], protectedSkipped: [], deleteSkipped: [] };
         }
         const existing = await listAllFiles(d, head);
         const protectedPaths = await readProtectedPaths(d, existing);
         const next = new Map(existing);
         const preserved = [];
         const protectedSkipped = [];
+        const deleteSkipped = [];
         // Base-sha updates for this attempt only (reset on PushRejectedError
         // retry, applied to storage only after this attempt's push succeeds).
         // null means "delete this path's entry".
@@ -243,7 +256,15 @@ async function commitOp(d, msg) {
             if (snapshot.has(path)) {
                 // Deleting a protected file is an edit too — the tree's copy stays.
                 if (protectedPaths.has(path)) protectedSkipped.push(path);
-                else {
+                // The same freshness rule the payload files get: a deletion is
+                // only ours to make while the tree still holds what our last Pull
+                // showed us. Once a teammate has pushed over it, dropping it here
+                // would wipe work we never saw. The base entry deliberately keeps
+                // its stale value, so the skip repeats until a Pull hands the
+                // editor their version and the kid can delete that.
+                else if (pullShas?.[path] && (await entrySha(d, existing.get(path))) !== pullShas[path]) {
+                    deleteSkipped.push(path);
+                } else {
                     next.delete(path);
                     shaUpdates.set(path, null);
                 }
@@ -287,7 +308,7 @@ async function commitOp(d, msg) {
             ? (await d.git.readCommit({ fs: d.fs, gitdir: d.gitdir, oid: head })).commit.tree
             : null;
         if (newTree === oldTree) {
-            return { committed: false, head: head.slice(0, 7), message: 'no changes', pushed: false, preserved, protectedSkipped };
+            return { committed: false, head: head.slice(0, 7), message: 'no changes', pushed: false, preserved, protectedSkipped, deleteSkipped };
         }
         const message = (msg.message ?? '').trim() || `Update from Pybricks at ${new Date(d.now()).toISOString()}`;
         const author = {
@@ -330,7 +351,7 @@ async function commitOp(d, msg) {
                 }
                 await d.storage.set({ lastPullShas: merged });
             }
-            return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved, protectedSkipped };
+            return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved, protectedSkipped, deleteSkipped };
         } catch (err) {
             if (err && err.code === 'PushRejectedError') {
                 lastErr = err; // someone else pushed between our fetch and push — rebuild on the new head

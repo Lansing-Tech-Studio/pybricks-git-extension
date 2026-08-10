@@ -53,9 +53,11 @@ have to rediscover them:
 ### What the driver does (maps to acceptance steps)
 
 1. Starts the git harness with a seeded bare repo containing `starter.py`,
-   `keep.py`, and `gone.py` — the latter two exist so the merge step (8) has
-   files the editor provably never touched since the last Pull, the case a
-   Pull must resolve silently in the repo's favour.
+   `keep.py`, `gone.py`, `coach.py`, and a `.pybricks-git.json` protecting
+   `coach.py`. `keep.py`/`gone.py` exist so the merge step (8) has files the
+   editor provably never touched since the last Pull, the case a Pull must
+   resolve silently in the repo's favour; `coach.py` gives the same step a
+   protected file, where the repo wins with no rescue copy.
 2. Launches Chromium with the unpacked extension.
 3. Attaches to the extension **service_worker** target, writes settings via
    `chrome.storage.local.set({settings:{repoUrl,branch,token,name,email}})`,
@@ -66,26 +68,33 @@ have to rediscover them:
    **isolated world** (`Runtime.executionContextCreated`, name `Pybricks Git`),
    and captures `Runtime.exceptionThrown` (tagged `page:`) from attach onward.
 5. Waits for the toolbar buttons, dismisses the Welcome Tour, then **Pull**
-   (trusted click) → asserts label `↓ +3 ~0 -0` (the three seed files) → waits
-   for reload → `pageRequest('list-files')` contains `starter.py`.
+   (trusted click) → asserts label `↓ +4 ~0 -0` (the four seeded `.py` files;
+   the manifest isn't `.py`, so it never reaches the editor) → waits for
+   reload → `pageRequest('list-files')` contains `starter.py`.
 6. Seeds a second file (`e2e.py`) via `pageRequest('apply-files', …)`, real-clicks
    **Commit**, trusted-types `e2e message`, trusted Enter → asserts the label
    timeline `Committing…` → `✓ <sha> ↑`.
 7. Asserts harness-side: `bareSubjects` includes `e2e message`, `e2e.py` is in
    the bare repo, and `starter.py` is still present (first-commit guard held).
 8. **Merge on Pull.** Writes local edits straight into IndexedDB via
-   `upsert-files` (a new `scratch.py`, an edited `starter.py`), pushes a
-   competing commit to the bare repo (`starter.py`/`keep.py` changed, `gone.py`
-   deleted), real-clicks **Pull** again → asserts label `↓ +1 ~2 -1` → waits for
-   reload → asserts the rescue notice names `starter.py`/`starter_mine.py` and
-   says nothing about the untouched `keep.py` → asserts the post-merge
+   `upsert-files` (a new `scratch.py`, an edited `starter.py`, an edited
+   `coach.py`), pushes a competing commit to the bare repo
+   (`starter.py`/`keep.py`/`coach.py` changed, `gone.py` deleted), real-clicks
+   **Pull** again → asserts label `↓ +1 ~3 -1` → waits for reload → asserts the
+   rescue notice names `starter.py`/`starter_mine.py` and says nothing about the
+   untouched `keep.py` or the protected `coach.py` → asserts the post-merge
    IndexedDB: `scratch.py` (never committed) survives untouched, `starter.py`
    holds the repo's competing version, the local edit is rescued to
    `starter_mine.py`, `keep.py` silently took the upstream version with no
-   `keep_mine.py` sibling, and `gone.py` is gone.
-9. Asserts zero **extension** exceptions across **both** the page and the
-   service worker.
-10. Captures a screenshot, writing `toolbar.png`.
+   `keep_mine.py` sibling, `gone.py` is gone, and `coach.py` took the repo's
+   version with **no** `coach_mine.py` — protection overwrites, never rescues.
+9. **Deletion freshness.** Pushes another competing `keep.py`, deletes `keep.py`
+   from IndexedDB (`apply-files` with it withheld), real-clicks **Commit** →
+   asserts the push succeeded, the bare repo still holds the teammate's
+   `keep.py`, and a `[data-pybricks-git-notice]` names the skipped deletion.
+10. Asserts zero **extension** exceptions across **both** the page and the
+    service worker.
+11. Captures a screenshot, writing `toolbar.png`.
 
 ## What PASS looks like
 
@@ -98,14 +107,14 @@ driver's own comments use for it:
 [e2e] === STEP 2: Configure settings via the service_worker target ===
 [e2e] PASS: settings written to chrome.storage.local via SW
 
-[e2e] === STEP 3: Pull: real-click, expect label "↓ +3 ~0 -0", then reload ===
+[e2e] === STEP 3: Pull: real-click, expect label "↓ +4 ~0 -0", then reload ===
 [e2e]   pull label -> "Pulling…"
-[e2e]   pull label -> "↓ +3 ~0 -0"
-[e2e] PASS: Pull label is "↓ +3 ~0 -0" (got "↓ +3 ~0 -0")
+[e2e]   pull label -> "↓ +4 ~0 -0"
+[e2e] PASS: Pull label is "↓ +4 ~0 -0" (got "↓ +4 ~0 -0")
 [e2e] PASS: starter.py present in editor IndexedDB after Pull+reload
 
 [e2e] === STEP 4: Seed a second file, then Commit with message "e2e message" ===
-[e2e] apply-files summary: { added: 1, changed: 0, deleted: 0, unchanged: 3 }
+[e2e] apply-files summary: { added: 1, changed: 0, deleted: 0, unchanged: 4 }
 [e2e] PASS: commit label showed "Committing…"
 [e2e] PASS: commit label shows "✓ <sha> ↑" (got "✓ <sha> ↑")
 
@@ -115,12 +124,13 @@ driver's own comments use for it:
 [e2e] PASS: starter.py still present in the bare repo (first-commit guard held)
 
 [e2e] === STEP 6: Merge on Pull: local work survives, untouched files follow the repo ===
-[e2e] local edits written: { added: 1, changed: 1, deleted: 0, unchanged: 3 }
+[e2e] local edits written: { added: 1, changed: 2, deleted: 0, unchanged: 0 }
 [e2e]   pull label -> "Pulling…"
-[e2e]   pull label -> "↓ +1 ~2 -1"
-[e2e] PASS: merge Pull label is "↓ +1 ~2 -1" (got "↓ +1 ~2 -1")
+[e2e]   pull label -> "↓ +1 ~3 -1"
+[e2e] PASS: merge Pull label is "↓ +1 ~3 -1" (got "↓ +1 ~3 -1")
 [e2e] PASS: rescue notice names both starter.py and starter_mine.py
 [e2e] PASS: rescue notice says nothing about the untouched keep.py
+[e2e] PASS: rescue notice says nothing about the protected coach.py (overwritten, never rescued)
 [e2e] PASS: scratch.py (created locally, never committed) survived the Pull
 [e2e] PASS: starter.py holds the repo's competing version
 [e2e] PASS: the local starter.py edit was rescued to starter_mine.py
@@ -128,30 +138,37 @@ driver's own comments use for it:
 [e2e] PASS: exactly one keep.py in the editor
 [e2e] PASS: no keep_mine.py sibling for the untouched file
 [e2e] PASS: untouched gone.py went away with the upstream deletion
+[e2e] PASS: the protected coach.py took the repo's version despite the local edit
+[e2e] PASS: a protected file is overwritten with no rescue copy
 
-[e2e] === STEP 7: Zero extension exceptions (page + service worker) ===
+[e2e] === STEP 7: Commit: a locally deleted file a teammate changed is kept, with a notice ===
+[e2e] PASS: keep.py removed from IndexedDB ({"added":0,"changed":0,"deleted":1,"unchanged":5})
+[e2e] PASS: delete commit pushed (got "✓ <sha> ↑")
+[e2e] PASS: the teammate's keep.py survived a local deletion it never saw
+[e2e] PASS: the skipped deletion is reported to the kid by name
+
+[e2e] === STEP 8: Zero extension exceptions (page + service worker) ===
 [e2e] PASS: zero extension exceptions (saw 0)
 
 [e2e] ================= PASS =================
-[e2e] Pull label:        ↓ +3 ~0 -0
+[e2e] Pull label:        ↓ +4 ~0 -0
 [e2e] Commit timeline:   Committing…  ->  ✓ <sha> ↑
 [e2e] Commit head:       ✓ <sha> ↑
-[e2e] Merge Pull label:  ↓ +1 ~2 -1
+[e2e] Merge Pull label:  ↓ +1 ~3 -1
 ```
 
 ### Label timelines (the load-bearing evidence)
 
 | Action     | Button label timeline |
 |---|---|
-| Pull       | `Pull` → `Pulling…` → `↓ +3 ~0 -0` → (page reloads) |
+| Pull       | `Pull` → `Pulling…` → `↓ +4 ~0 -0` → (page reloads) |
 | Commit     | `Commit` → `Committing…` → `✓ <sha> ↑` |
-| Merge Pull | `Pull` → `Pulling…` → `↓ +1 ~2 -1` → (page reloads) |
+| Merge Pull | `Pull` → `Pulling…` → `↓ +1 ~3 -1` → (page reloads) |
 
 `toolbar.png` (committed alongside this README) is the final screenshot,
-taken after the merge-on-pull step's reload — the toolbar buttons are back at
-their default `Commit`/`Pull` labels, and the rescue notice for the
-`starter.py` → `starter_mine.py` rescue is still on screen (it doesn't
-self-dismiss until 20s after it renders).
+taken after the deletion-freshness commit — the Commit button still reads
+`✓ <sha> ↑`, and the notice explaining why `keep.py` wasn't deleted is on
+screen (it doesn't self-dismiss until 15s after it renders).
 
 ## Bugs found
 
