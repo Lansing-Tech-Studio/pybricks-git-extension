@@ -52,7 +52,10 @@ have to rediscover them:
 
 ### What the driver does (maps to acceptance steps)
 
-1. Starts the git harness with a seeded bare repo containing `starter.py`.
+1. Starts the git harness with a seeded bare repo containing `starter.py`,
+   `keep.py`, and `gone.py` — the latter two exist so the merge step (8) has
+   files the editor provably never touched since the last Pull, the case a
+   Pull must resolve silently in the repo's favour.
 2. Launches Chromium with the unpacked extension.
 3. Attaches to the extension **service_worker** target, writes settings via
    `chrome.storage.local.set({settings:{repoUrl,branch,token,name,email}})`,
@@ -63,69 +66,89 @@ have to rediscover them:
    **isolated world** (`Runtime.executionContextCreated`, name `Pybricks Git`),
    and captures `Runtime.exceptionThrown` (tagged `page:`) from attach onward.
 5. Waits for the toolbar buttons, dismisses the Welcome Tour, then **Pull**
-   (trusted click) → asserts label `↓ +1 ~0 -0` → waits for reload →
-   `pageRequest('list-files')` contains `starter.py`.
+   (trusted click) → asserts label `↓ +3 ~0 -0` (the three seed files) → waits
+   for reload → `pageRequest('list-files')` contains `starter.py`.
 6. Seeds a second file (`e2e.py`) via `pageRequest('apply-files', …)`, real-clicks
    **Commit**, trusted-types `e2e message`, trusted Enter → asserts the label
    timeline `Committing…` → `✓ <sha> ↑`.
 7. Asserts harness-side: `bareSubjects` includes `e2e message`, `e2e.py` is in
    the bare repo, and `starter.py` is still present (first-commit guard held).
-8. Asserts zero **extension** exceptions across **both** the page and the
-   service worker, and writes `toolbar.png`.
+8. **Merge on Pull.** Writes local edits straight into IndexedDB via
+   `upsert-files` (a new `scratch.py`, an edited `starter.py`), pushes a
+   competing commit to the bare repo (`starter.py`/`keep.py` changed, `gone.py`
+   deleted), real-clicks **Pull** again → asserts label `↓ +1 ~2 -1` → waits for
+   reload → asserts the rescue notice names `starter.py`/`starter_mine.py` and
+   says nothing about the untouched `keep.py` → asserts the post-merge
+   IndexedDB: `scratch.py` (never committed) survives untouched, `starter.py`
+   holds the repo's competing version, the local edit is rescued to
+   `starter_mine.py`, `keep.py` silently took the upstream version with no
+   `keep_mine.py` sibling, and `gone.py` is gone.
+9. Asserts zero **extension** exceptions across **both** the page and the
+   service worker.
+10. Captures a screenshot, writing `toolbar.png`.
 
 ## What PASS looks like
 
-Recorded from a real passing run (Chromium 1194, `2026-07-03`):
+Assembled from the driver's own step markers and `assert()` messages (each
+passing assertion logs `PASS: <msg>`) — not a captured transcript, so the one
+dynamic value (the commit sha) is shown as `<sha>`, the same placeholder the
+driver's own comments use for it:
 
 ```
 [e2e] === STEP 2: Configure settings via the service_worker target ===
-[e2e] service worker target: chrome-extension://<id>/src/background.js
 [e2e] PASS: settings written to chrome.storage.local via SW
 
-[e2e] === STEP 3: Dismiss the Pybricks Welcome Tour if present ===
-[e2e] joyride buttons: [{"action":"primary","text":"Next (1/7)"},{"action":"close","text":""}]
-[e2e] clicking tour dismiss: close (368,416)
-[e2e] welcome tour dismissed
-
-[e2e] === STEP 3: Pull: real-click, expect label "↓ +1 ~0 -0", then reload ===
-[e2e] elementFromPoint(pull center): BUTTON [1335,10 50x60]  <  DIV.pb-toolbar ...
+[e2e] === STEP 3: Pull: real-click, expect label "↓ +3 ~0 -0", then reload ===
 [e2e]   pull label -> "Pulling…"
-[e2e]   pull label -> "↓ +1 ~0 -0"
-[e2e] PASS: Pull label is "↓ +1 ~0 -0" (got "↓ +1 ~0 -0")
-[e2e] editor files after pull: [ 'starter.py' ]
+[e2e]   pull label -> "↓ +3 ~0 -0"
+[e2e] PASS: Pull label is "↓ +3 ~0 -0" (got "↓ +3 ~0 -0")
 [e2e] PASS: starter.py present in editor IndexedDB after Pull+reload
 
 [e2e] === STEP 4: Seed a second file, then Commit with message "e2e message" ===
-[e2e] apply-files summary: { added: 1, changed: 0, deleted: 0, unchanged: 1 }
-[e2e] commit label timeline: [ 'Committing…', '✓ f74d29e ↑' ]
+[e2e] apply-files summary: { added: 1, changed: 0, deleted: 0, unchanged: 3 }
 [e2e] PASS: commit label showed "Committing…"
-[e2e] PASS: commit label shows "✓ <sha> ↑" (got "✓ f74d29e ↑")
+[e2e] PASS: commit label shows "✓ <sha> ↑" (got "✓ <sha> ↑")
 
 [e2e] === STEP 5: Harness-side assertions on the pushed commit ===
-[e2e] bare subjects: [ 'e2e message', 'seed' ]
 [e2e] PASS: bareSubjects includes "e2e message"
-[e2e] bareFile e2e.py = "print(\"e2e\")\n"
 [e2e] PASS: e2e.py pushed to the bare repo
 [e2e] PASS: starter.py still present in the bare repo (first-commit guard held)
 
-[e2e] === STEP 6: Zero extension exceptions (page + service worker) ===
+[e2e] === STEP 6: Merge on Pull: local work survives, untouched files follow the repo ===
+[e2e] local edits written: { added: 1, changed: 1, deleted: 0, unchanged: 3 }
+[e2e]   pull label -> "Pulling…"
+[e2e]   pull label -> "↓ +1 ~2 -1"
+[e2e] PASS: merge Pull label is "↓ +1 ~2 -1" (got "↓ +1 ~2 -1")
+[e2e] PASS: rescue notice names both starter.py and starter_mine.py
+[e2e] PASS: rescue notice says nothing about the untouched keep.py
+[e2e] PASS: scratch.py (created locally, never committed) survived the Pull
+[e2e] PASS: starter.py holds the repo's competing version
+[e2e] PASS: the local starter.py edit was rescued to starter_mine.py
+[e2e] PASS: untouched keep.py silently took the upstream version
+[e2e] PASS: exactly one keep.py in the editor
+[e2e] PASS: no keep_mine.py sibling for the untouched file
+[e2e] PASS: untouched gone.py went away with the upstream deletion
+
+[e2e] === STEP 7: Zero extension exceptions (page + service worker) ===
 [e2e] PASS: zero extension exceptions (saw 0)
 
 [e2e] ================= PASS =================
-[e2e] Pull label:       ↓ +1 ~0 -0
-[e2e] Commit timeline:  Committing…  ->  ✓ f74d29e ↑
-[e2e] Commit head:      ✓ f74d29e ↑
+[e2e] Pull label:        ↓ +3 ~0 -0
+[e2e] Commit timeline:   Committing…  ->  ✓ <sha> ↑
+[e2e] Commit head:       ✓ <sha> ↑
+[e2e] Merge Pull label:  ↓ +1 ~2 -1
 ```
 
 ### Label timelines (the load-bearing evidence)
 
-| Action | Button label timeline |
+| Action     | Button label timeline |
 |---|---|
-| Pull   | `Pull` → `Pulling…` → `↓ +1 ~0 -0` → (page reloads) |
-| Commit | `Commit` → `Committing…` → `✓ f74d29e ↑` |
+| Pull       | `Pull` → `Pulling…` → `↓ +3 ~0 -0` → (page reloads) |
+| Commit     | `Commit` → `Committing…` → `✓ <sha> ↑` |
+| Merge Pull | `Pull` → `Pulling…` → `↓ +1 ~2 -1` → (page reloads) |
 
 `toolbar.png` (committed alongside this README) is the screenshot after the
-push: the Commit button reads `✓ f74d29e ↑`.
+first push.
 
 ## Bugs found
 
