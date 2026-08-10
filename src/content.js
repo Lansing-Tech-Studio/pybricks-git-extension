@@ -26,19 +26,22 @@ function pageRequest(op, payload) {
     });
 }
 
+const storageGet = (key) =>
+    new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key])));
+const storageSet = (obj) =>
+    new Promise((resolve) => chrome.storage.local.set(obj, () => resolve()));
+
 const menuPanel = makeMenuPanel({
     pageRequest,
     serverRequest,
-    storageGet: (key) =>
-        new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
-    storageSet: (obj) => new Promise((resolve) => chrome.storage.local.set(obj, () => resolve())),
+    storageGet,
+    storageSet,
     reload: () => location.reload(),
 });
 
 const fileListWatcher = makeFileListWatcher({
     pageRequest,
-    storageGet: (key) =>
-        new Promise((resolve) => chrome.storage.local.get(key, (v) => resolve(v[key]))),
+    storageGet,
     addSlot: (module, fn, blocks) => menuPanel.addSlot(module, fn, blocks),
     onNewProgram: () =>
         menuPanel.newProgram().catch((err) =>
@@ -48,6 +51,8 @@ const fileListWatcher = makeFileListWatcher({
 fileListWatcher.start().catch((err) => console.warn('[pybricks-git] file-list watcher failed:', err));
 
 mountButton().catch((err) => console.warn('[pybricks-git] mount failed:', err));
+
+showRescueNotice().catch((err) => console.warn('[pybricks-git] rescue notice failed:', err));
 
 async function mountButton() {
     const toolbar = await waitFor(() =>
@@ -226,6 +231,46 @@ function showProtectedNotice(paths) {
     setTimeout(() => box.remove(), 15000);
 }
 
+// Kid-facing report of what Pull rescued. Rendered on the page load *after*
+// the pull's reload, because that's when the rescued files are actually
+// visible in the file list. Click, Escape, or the timeout dismisses it.
+async function showRescueNotice() {
+    const rescued = await storageGet('pullRescued');
+    if (!rescued || !rescued.length) return;
+    await storageSet({ pullRescued: [] });
+
+    const box = document.createElement('div');
+    box.dataset.pybricksGitRescue = '1';
+    box.setAttribute('role', 'status');
+    box.tabIndex = 0;
+    box.textContent =
+        `The repo had its own version of ${rescued.length === 1 ? 'this file' : 'these files'}, ` +
+        `so your changes were saved alongside it: ` +
+        rescued.map((r) => `${r.path} → ${r.savedAs}`).join(', ');
+    box.title = 'Click or press Escape to dismiss';
+    box.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape' || ev.key === 'Enter' || ev.key === ' ') box.remove();
+    });
+    Object.assign(box.style, {
+        position: 'fixed',
+        top: '48px',
+        right: '12px',
+        maxWidth: '360px',
+        padding: '10px 14px',
+        background: '#0d3b2e',
+        color: '#a8f0d4',
+        border: '1px solid #1c7a5c',
+        borderRadius: '4px',
+        font: 'inherit',
+        fontSize: '13px',
+        zIndex: 10000,
+        cursor: 'pointer',
+    });
+    box.addEventListener('click', () => box.remove());
+    document.body.appendChild(box);
+    setTimeout(() => box.remove(), 20000);
+}
+
 async function pull(btn) {
     const original = 'Pull';
     btn.textContent = 'Pulling…';
@@ -248,7 +293,31 @@ async function pull(btn) {
         }
         console.log(`[pybricks-git] received ${result.files.length} file(s)`);
 
-        const summary = await pageRequest('apply-files', { files: result.files });
+        // Never hand apply-files the repo's set directly — it deletes every
+        // path it isn't given, which is how uncommitted local work used to
+        // disappear. planPull returns the full desired set: the repo's files,
+        // plus rescued copies of anything edited locally, plus never-committed
+        // local files left alone.
+        const editor = await pageRequest('list-files');
+        const shaByPath = new Map(editor.metadata.map((m) => [m.path, m.sha256]));
+        const plan = planPull({
+            local: editor.contents.map((c) => ({
+                path: c.path,
+                contents: c.contents,
+                sha: shaByPath.get(c.path),
+            })),
+            repo: result.files,
+            base: (await storageGet('lastPullShas')) ?? {},
+            protectedPaths: result.protected ?? [],
+        });
+        if (plan.rescued.length) {
+            console.warn('[pybricks-git] rescued local edits:', plan.rescued);
+            // The reload below wipes any notice we show now, so hand it to the
+            // next page load — same trick as the menu panel's spliceReport.
+            await storageSet({ pullRescued: plan.rescued });
+        }
+
+        const summary = await pageRequest('apply-files', { files: plan.files });
         console.log('[pybricks-git] applied:', summary);
         btn.textContent = `↓ +${summary.added} ~${summary.changed} -${summary.deleted}`;
 
