@@ -156,8 +156,24 @@ function makeMenuPanel(deps) {
             flex: '1',
         });
 
+        // Footer is a shell row, not the tail of `body`: the slot/program lists
+        // can outgrow the 70vh panel, and Save must stay in reach without scrolling.
+        const footer = document.createElement('div');
+        footer.dataset.pybricksGitPanelFooter = '1';
+        Object.assign(footer.style, {
+            display: 'flex',
+            gap: '8px',
+            alignItems: 'center',
+            flexShrink: '0',
+            padding: '10px 12px',
+            borderTop: '1px solid #444',
+            background: '#2d2d30',
+            borderRadius: '0 0 6px 6px',
+        });
+
         root.appendChild(header);
         root.appendChild(body);
+        root.appendChild(footer);
         return root;
     }
 
@@ -287,11 +303,8 @@ function makeMenuPanel(deps) {
         if (!state.programs.length) programs.appendChild(noteEl('No programs found — Pull first?'));
         body.appendChild(programs);
 
-        const footer = document.createElement('div');
-        Object.assign(footer.style, {
-            display: 'flex', gap: '8px', alignItems: 'center',
-            paddingTop: '10px', borderTop: '1px solid #444', marginTop: '10px',
-        });
+        const footer = panel.querySelector('[data-pybricks-git-panel-footer]');
+        footer.textContent = '';
         const save = document.createElement('button');
         save.dataset.pybricksGitSave = '1';
         save.textContent = state.dirty ? 'Save menu' : 'Saved';
@@ -322,7 +335,6 @@ function makeMenuPanel(deps) {
         status.dataset.pybricksGitStatus = '1';
         footer.appendChild(save);
         footer.appendChild(status);
-        body.appendChild(footer);
     }
 
     // --- new program from team setup -------------------------------------
