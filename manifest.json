@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Pybricks Git",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Version control for code.pybricks.com — commits straight to your team's GitHub fork",
   "icons": {
     "16": "icons/icon16.png",
