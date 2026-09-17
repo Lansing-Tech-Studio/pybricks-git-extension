@@ -12,7 +12,7 @@ const srcPath = path.join(here, '..', 'src', 'menu-config.js');
 export function loadMenuConfig() {
     const src =
         readFileSync(srcPath, 'utf8') +
-        '\n;globalThis.__pybricksMenuConfigTest = { parseMenuConfig, generateMenuConfig, pyRepr, validateDisplay, validateItem, analyzeProgram, topLevelStatements, nextFreeDisplayNumber };';
+        '\n;globalThis.__pybricksMenuConfigTest = { parseMenuConfig, generateMenuConfig, bundleHintModules, generateBundleHints, pyRepr, validateDisplay, validateItem, analyzeProgram, topLevelStatements, nextFreeDisplayNumber };';
     // eslint-disable-next-line no-new-func
     new Function(src)();
     return globalThis.__pybricksMenuConfigTest;

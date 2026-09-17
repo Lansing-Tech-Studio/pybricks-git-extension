@@ -1,5 +1,9 @@
 import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { loadMenuConfig } from './load-menu-config.mjs';
 
 const api = loadMenuConfig();
@@ -89,6 +93,150 @@ describe('generateMenuConfig', () => {
         const text = api.generateMenuConfig([]);
         assert.match(text, /^"""/);
         assert.equal(text.match(/^MENU_ITEMS\s*=/gm).length, 1);
+    });
+});
+
+// main.py picks slots with `__import__(item["module"])` — a string, invisible to
+// every static bundler — so generateMenuConfig emits a guarded hint block. These
+// tests pin the three things that make it work: the imports are there, the guard
+// never runs them, and the guard survives the compiler's constant folding.
+describe('generateMenuConfig bundle hints', () => {
+    const ITEMS = [
+        { display: 1, module: 'mission_01_go_out_and_turn', function: 'run' },
+        { display: 2, module: 'my_blocks_program' },
+        { display: 3, module: 'arm_moves', function: 'lift_arm', blocks: true },
+        { display: 4, module: 'arm_moves', function: 'drop_arm', blocks: true },
+        { display: 9, module: 'me05', function: 'run', enabled: false },
+    ];
+
+    test('emits a guarded import for every item kind', () => {
+        const text = api.generateMenuConfig(ITEMS);
+        assert.match(text, /^_BUNDLE_HINTS = False$/m);
+        assert.match(text, /^if _BUNDLE_HINTS:$/m);
+        // function-item, whole-program item, and blocks: True item alike
+        assert.match(text, /^    import mission_01_go_out_and_turn$/m);
+        assert.match(text, /^    import my_blocks_program$/m);
+        assert.match(text, /^    import arm_moves$/m);
+    });
+    test('emits for disabled slots too (a kid can flip enabled back to True)', () => {
+        assert.match(api.generateMenuConfig(ITEMS), /^    import me05$/m);
+    });
+    test('never emits a bare top-level import', () => {
+        const text = api.generateMenuConfig(ITEMS);
+        assert.equal(text.match(/^import /gm), null);
+    });
+    test('dedupes module names, preserving list order', () => {
+        assert.deepEqual(api.bundleHintModules(ITEMS), [
+            'mission_01_go_out_and_turn', 'my_blocks_program', 'arm_moves', 'me05',
+        ]);
+        const imports = api.generateMenuConfig(ITEMS).match(/^    import (\w+)$/gm);
+        assert.equal(imports.length, 4);
+    });
+    test('empty MENU_ITEMS emits no hint block at all', () => {
+        // `if` with an empty body is a SyntaxError.
+        const text = api.generateMenuConfig([]);
+        assert.equal(text.includes('_BUNDLE_HINTS'), false);
+        assert.equal(text.includes('import'), false);
+    });
+    test('drops non-bare / absent module names instead of emitting bad syntax', () => {
+        assert.deepEqual(api.bundleHintModules([
+            { display: 1, module: 'pkg.mod' },
+            { display: 2 },
+            { display: 3, module: '' },
+            { display: 4, module: 'good_one' },
+        ]), ['good_one']);
+    });
+    test('hints do not disturb the MENU_ITEMS round-trip', () => {
+        const back = api.parseMenuConfig(api.generateMenuConfig(ITEMS));
+        assert.equal(back.error, null);
+        assert.deepEqual(back.items, ITEMS);
+    });
+    test("parseMenuConfig's ^MENU_ITEMS\\s*= anchor still finds exactly one match", () => {
+        const text = api.generateMenuConfig(ITEMS);
+        assert.equal(text.match(/^MENU_ITEMS\s*=/gm).length, 1);
+    });
+});
+
+// These need the real `python3` binary, like the git engine needs `git` and
+// test/pack.test.mjs needs `unzip`. They are the only proof that the generated
+// file actually compiles and that a static bundler actually sees the hints.
+describe('generateMenuConfig bundle hints (real python3)', () => {
+    const ITEMS = [
+        { display: 1, module: 'mission_01_go_out_and_turn', function: 'run' },
+        { display: 2, module: 'my_blocks_program' },
+        { display: 9, module: 'gone_missing', enabled: false },
+    ];
+
+    function py(script, cwd) {
+        return execFileSync('python3', ['-c', script], { encoding: 'utf8', cwd }).trim();
+    }
+
+    test('generated file is valid Python with the docstring still first', () => {
+        const dir = mkdtempSync(path.join(tmpdir(), 'pybricks-menucfg-'));
+        writeFileSync(path.join(dir, 'menu_config.py'), api.generateMenuConfig(ITEMS));
+        const out = py(
+            'import ast;' +
+            'm=ast.parse(open("menu_config.py").read(), "menu_config.py");' +
+            'print(ast.get_docstring(m) is not None, [type(n).__name__ for n in m.body])',
+            dir,
+        );
+        // docstring present, then exactly the hint assignment, the guard, and MENU_ITEMS
+        assert.equal(out, "True ['Expr', 'Assign', 'If', 'Assign']");
+    });
+
+    test('importing it runs nothing: MENU_ITEMS loads, hinted modules stay unimported', () => {
+        const dir = mkdtempSync(path.join(tmpdir(), 'pybricks-menucfg-'));
+        writeFileSync(path.join(dir, 'menu_config.py'), api.generateMenuConfig(ITEMS));
+        // A hinted module that WOULD blow up (and print) if the guard ever ran.
+        writeFileSync(path.join(dir, 'my_blocks_program.py'), 'raise SystemExit("hint ran!")\n');
+        writeFileSync(path.join(dir, 'mission_01_go_out_and_turn.py'), 'def run(robot):\n    pass\n');
+        const out = py(
+            'import sys, menu_config;' +
+            'print(len(menu_config.MENU_ITEMS),' +
+            ' "my_blocks_program" in sys.modules,' +
+            ' menu_config._BUNDLE_HINTS)',
+            dir,
+        );
+        assert.equal(out, '3 False False');
+    });
+
+    test("ModuleFinder resolves every slot module (the bug this block exists for)", () => {
+        const dir = mkdtempSync(path.join(tmpdir(), 'pybricks-menucfg-'));
+        writeFileSync(path.join(dir, 'menu_config.py'), api.generateMenuConfig(ITEMS));
+        // Stand-in for the starter's main.py: imports the config, then reaches the
+        // slot modules only through a STRING, exactly as the real loader does.
+        writeFileSync(
+            path.join(dir, 'main.py'),
+            'from menu_config import MENU_ITEMS\n' +
+            'for item in MENU_ITEMS:\n    __import__(item["module"])\n',
+        );
+        writeFileSync(path.join(dir, 'mission_01_go_out_and_turn.py'), 'def run(robot):\n    pass\n');
+        writeFileSync(path.join(dir, 'my_blocks_program.py'), 'x = 1\n');
+        const out = py(
+            'from modulefinder import ModuleFinder;' +
+            'f=ModuleFinder(["."]); f.run_script("main.py");' +
+            'print(sorted(n for n,m in f.modules.items() if getattr(m,"__file__",None)))',
+            dir,
+        );
+        assert.equal(
+            out,
+            "['__main__', 'menu_config', 'mission_01_go_out_and_turn', 'my_blocks_program']",
+        );
+    });
+
+    test('a hinted module with no file is harmless (ModuleFinder just records it)', () => {
+        // `gone_missing` above has no .py file — the previous test already proved
+        // ModuleFinder does not raise. Pin that it lands in badmodules instead.
+        const dir = mkdtempSync(path.join(tmpdir(), 'pybricks-menucfg-'));
+        writeFileSync(path.join(dir, 'menu_config.py'), api.generateMenuConfig(ITEMS));
+        writeFileSync(path.join(dir, 'main.py'), 'import menu_config\n');
+        const out = py(
+            'from modulefinder import ModuleFinder;' +
+            'f=ModuleFinder(["."]); f.run_script("main.py");' +
+            'print("gone_missing" in f.badmodules)',
+            dir,
+        );
+        assert.equal(out, 'True');
     });
 });
 

@@ -10,6 +10,10 @@
 // plus exactly one top-level `MENU_ITEMS = [<dict literals>]`, values limited
 // to int/str/bool/None/list-of-str. The extension rewrites the whole file
 // from its own template — comments inside the list are not preserved.
+// The regenerated file also carries a `_BUNDLE_HINTS` guard block between the
+// docstring and MENU_ITEMS so the uploader can see the slot modules; see
+// "bundle hints" below. That's two extra top-level statements the starter's
+// check_project.py must learn to allow.
 
 const BLOCKS_SENTINEL = '# pybricks blocks file:';
 
@@ -153,6 +157,62 @@ comments inside the MENU_ITEMS list are not kept.
 
 const MENU_CONFIG_KEY_ORDER = ['display', 'module', 'function', 'blocks', 'enabled'];
 
+// --- bundle hints --------------------------------------------------------------
+//
+// main.py loads a slot with `__import__(item["module"])` — a *string*. Both
+// pybricksdev bundlers and code.pybricks.com resolve dependencies statically
+// (ModuleFinder on v1.1, mpy-cross + mpy-tool IMPORT_NAME scanning on v2.x), so
+// a module named only in a string is never uploaded and the hub raises
+// `ImportError: no module named '<module>'` the moment the kid picks that slot.
+//
+// menu_config.py is the only team-owned file main.py imports statically, and we
+// rewrite it wholesale, so the hints have to live here or they'd be wiped on the
+// next Save. See test/menu-config.test.mjs for the ModuleFinder proof.
+
+// Module names referenced by MENU_ITEMS: deduped (one block file can back
+// several My Block slots), list order preserved, and DISABLED SLOTS INCLUDED —
+// a kid flips `enabled` back to True in the editor and a missing hint would
+// break the upload silently. Non-bare/absent names are dropped: they'd be a
+// syntax error, and validateItem already rejects them upstream.
+function bundleHintModules(items) {
+    const seen = new Set();
+    const out = [];
+    for (const item of items) {
+        const name = item ? item.module : null;
+        if (!isBareModuleName(name) || seen.has(name)) continue;
+        seen.add(name);
+        out.push(name);
+    }
+    return out;
+}
+
+// The guard MUST be a runtime name lookup. `if False:` / `if 0:` / `__debug__`
+// are all constant-folded away by CPython's peephole optimizer and by
+// mpy-cross, which emits no IMPORT_NAME at all — the hint would silently do
+// nothing. A module-level `_BUNDLE_HINTS = False` read inside the `if` is a
+// LOAD_NAME the compiler can't prove, so the import opcodes survive while the
+// body never executes. Keeping them unexecuted matters: importing a
+// whole-program item would RUN the program, and even a plain mission module may
+// do top-level setup main.py defers to first use.
+//
+// Returns [] for an empty module list — `if` with an empty body won't compile.
+function generateBundleHints(items) {
+    const modules = bundleHintModules(items);
+    if (modules.length === 0) return [];
+    return [
+        '# Bundle hints: these imports never run (the "if" below is always false).',
+        '# They exist so your programs get uploaded to the hub along with main.py —',
+        '# the uploader only sends files it sees in a real "import" line.',
+        '#',
+        '# Leave the "_BUNDLE_HINTS" name alone: "if False:" would be deleted by the',
+        '# compiler and your programs would stop being uploaded.',
+        '_BUNDLE_HINTS = False',
+        'if _BUNDLE_HINTS:',
+        ...modules.map((m) => `    import ${m}`),
+        '',
+    ];
+}
+
 // Defaults are normalized away so the generated file stays minimal.
 function shouldEmitKey(item, key) {
     if (!(key in item)) return false;
@@ -163,7 +223,7 @@ function shouldEmitKey(item, key) {
 }
 
 function generateMenuConfig(items) {
-    const lines = [MENU_CONFIG_HEADER, '', 'MENU_ITEMS = ['];
+    const lines = [MENU_CONFIG_HEADER, '', ...generateBundleHints(items), 'MENU_ITEMS = ['];
     for (const item of items) {
         const keys = [
             ...MENU_CONFIG_KEY_ORDER.filter((k) => shouldEmitKey(item, k)),
