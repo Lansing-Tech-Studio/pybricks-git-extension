@@ -113,6 +113,8 @@ $('signOut').addEventListener('click', async () => {
     await loadForm();
 });
 
+$('version').textContent = `Pybricks Git v${chrome.runtime.getManifest().version}`;
+
 loadForm();
 refreshAuth();
 setInterval(refreshAuth, 2000);
