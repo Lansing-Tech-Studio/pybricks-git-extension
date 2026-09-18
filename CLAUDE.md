@@ -31,7 +31,7 @@ Everything runs in the browser; the only external party is `github.com`:
 
 **Why an ISOLATED/MAIN split:** The MAIN-world script (`inject.js`) can see the page's globals (and could in principle use the page's Dexie instance, though we don't); the ISOLATED-world scripts have access to `chrome.runtime` APIs so they can message the service worker. The split is mandatory — only the MAIN world reaches the page's IndexedDB, only the ISOLATED world reaches `chrome.runtime`. They communicate via `window.postMessage` with `pybricks-git:request` / `pybricks-git:response` envelopes; `content.js` reaches the service worker via `chrome.runtime.sendMessage`.
 
-**Message ops (`content.js` ↔ `background.js`):** all one-shot request/response over `chrome.runtime.sendMessage`; any op can resolve to `{error}` on failure.
+**Message ops (`content.js` ↔ `background.js`):** all one-shot request/response over `chrome.runtime.sendMessage`; any op can resolve to `{error, details}` on failure. `error` is the one-line message; `details` is `describeError()`'s report (`{op, message, code, hint, lines}` — repo URL, branch, isomorphic-git step, HTTP status and server response, stack, with the token and URL credentials redacted; unit-tested in `test/background-wiring.test.mjs`). `content.js:showErrorPanel()` renders it for a failed Commit/Pull as a red `[data-pybricks-git-error]` panel that stays until dismissed, with a kid-facing hint and a **Copy details** button; failures on the page side (IndexedDB, a dead extension context) get the same shape from `localErrorDetails()`.
 
 | Op | Request | Success response |
 |---|---|---|

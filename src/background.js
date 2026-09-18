@@ -14,6 +14,7 @@ function makeEngine(deps) {
         status: () => statusOp(d),
         pull: () => pullOp(d),
         commit: (msg) => commitOp(d, msg ?? {}),
+        errorContext: () => errorContextOp(d),
     };
 }
 
@@ -40,6 +41,13 @@ function requireConfigured(s) {
 
 function onAuth(s) {
     return () => ({ username: 'x-access-token', password: s.token });
+}
+
+// What an error report needs to know about the configuration: where the
+// failing operation was pointed, plus the secrets describeError must scrub.
+async function errorContextOp(d) {
+    const s = await getSettings(d);
+    return { repoUrl: s.repoUrl, branch: s.branch, secrets: [s.token] };
 }
 
 async function statusOp(d) {
@@ -589,6 +597,108 @@ async function authSignOutOp(d) {
     return { signedIn: false };
 }
 
+// --- Error reports ---
+//
+// A failed op answers {error, details}: `error` stays the one-line message
+// every caller already shows, `details` is what content.js renders in the
+// error panel so a coach can see (and copy) why a Commit or Pull failed.
+// Pure and DI-free so it's unit-tested directly.
+
+const ERROR_TEXT_LIMIT = 2000;
+
+// Kid/coach-facing next step for the failures we can recognise; null when we
+// can't say anything more useful than the raw message.
+function errorHint(err) {
+    const code = err && err.code;
+    const msg = String((err && err.message) || err || '');
+    const status = code === 'HttpError' && err.data ? err.data.statusCode : null;
+    if (/not configured/i.test(msg)) {
+        return 'Click the Pybricks Git extension icon and sign in with GitHub.';
+    }
+    if (status === 401) {
+        return "GitHub didn't accept the sign-in. Open the extension settings and sign in again (or paste a new token).";
+    }
+    if (status === 403) {
+        return 'GitHub refused access. Check that this account (or token) is allowed to write to the repo — or, if you just made many requests, wait a few minutes and try again.';
+    }
+    if (status === 404) {
+        return "GitHub couldn't find the repo. Check the Repo/fork URL in the extension settings; for a private fork, check the token can see it.";
+    }
+    if (typeof status === 'number' && status >= 500) {
+        return 'GitHub had a problem on its side. Wait a minute and try again.';
+    }
+    if (/push kept being rejected/i.test(msg) || code === 'PushRejectedError') {
+        return 'Teammates kept pushing at the same moment. Wait a few seconds and try again.';
+    }
+    if (code === 'GitPushError') {
+        return 'GitHub rejected the push — the branch may be protected. Check the branch rules on GitHub.';
+    }
+    if (/failed to fetch|networkerror|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|network/i.test(`${code} ${msg}`)) {
+        return "Couldn't reach GitHub. Check the internet connection and try again.";
+    }
+    return null;
+}
+
+function stringifyData(data) {
+    try {
+        return JSON.stringify(data);
+    } catch {
+        return String(data);
+    }
+}
+
+function truncate(text, limit = ERROR_TEXT_LIMIT) {
+    return text.length > limit ? `${text.slice(0, limit)}… (${text.length - limit} more characters)` : text;
+}
+
+// Strips credentials: every known secret, plus any user:password@ userinfo
+// in a URL (a repo URL pasted with an embedded token). Very short "secrets"
+// (test fixtures) are skipped: redacting them would mangle ordinary text.
+function redact(text, secrets = []) {
+    let out = String(text).replace(/(\/\/)[^/@\s]+@/g, '$1***@');
+    for (const secret of secrets) {
+        if (secret && secret.length >= 8) out = out.split(secret).join('***');
+    }
+    return out;
+}
+
+// -> {op, message, code, hint, lines}. `lines` is the full plain-text report
+// (the panel's expandable body and what Copy puts on the clipboard).
+function describeError(err, ctx = {}) {
+    const secrets = ctx.secrets ?? [];
+    const message = redact(String((err && err.message) || err || 'unknown error'), secrets);
+    const code = (err && typeof err === 'object' && err.code) || null;
+    const lines = [];
+    if (ctx.op) lines.push(`Operation: ${ctx.op}`);
+    if (ctx.repoUrl) lines.push(`Repo: ${ctx.repoUrl}`);
+    if (ctx.branch) lines.push(`Branch: ${ctx.branch}`);
+    if (err && err.caller) lines.push(`Step: ${err.caller}`);
+    const kind = (err && err.name && err.name !== 'Error' ? err.name : null) ?? code;
+    lines.push(`Error: ${kind ? `${kind}: ` : ''}${message}`);
+    if (code && code !== kind) lines.push(`Code: ${code}`);
+    const data = err && typeof err === 'object' ? err.data : undefined;
+    if (data && typeof data === 'object') {
+        const { response, ...rest } = data;
+        if (code === 'HttpError') {
+            lines.push(`HTTP status: ${data.statusCode} ${data.statusMessage ?? ''}`.trim());
+            delete rest.statusCode;
+            delete rest.statusMessage;
+        }
+        if (response) lines.push(`Server said: ${truncate(String(response).trim())}`);
+        if (Object.keys(rest).length) lines.push(`Details: ${truncate(stringifyData(rest))}`);
+    } else if (data !== undefined) {
+        lines.push(`Details: ${truncate(stringifyData(data))}`);
+    }
+    if (err && err.stack) lines.push('', 'Stack:', truncate(String(err.stack)));
+    return {
+        op: ctx.op ?? null,
+        message,
+        code,
+        hint: errorHint(err),
+        lines: lines.map((l) => redact(l, secrets)),
+    };
+}
+
 function makeMessageHandler(engine, auth, ui = {}) {
     return (msg, _sender, sendResponse) => {
         const ops = {
@@ -609,11 +719,18 @@ function makeMessageHandler(engine, auth, ui = {}) {
             sendResponse({ error: `unknown op: ${msg && msg.op}` });
             return false;
         }
-        run().then(sendResponse, (err) =>
+        run().then(sendResponse, async (err) => {
+            // The context lookup is best-effort: a failing storage read must
+            // not turn an error response into no response at all.
+            let ctx = {};
+            try {
+                ctx = (await engine.errorContext?.()) ?? {};
+            } catch {}
+            const details = describeError(err, { ...ctx, op: msg.op });
             // A non-Error throw has no .message; {error: undefined} reads as
             // success on the content side, so coerce to a non-empty string.
-            sendResponse({ error: String(err && err.message ? err.message : err) }),
-        );
+            sendResponse({ error: details.message, details });
+        });
         return true; // async sendResponse — keep the channel open
     };
 }

@@ -15,13 +15,13 @@ window.addEventListener('message', (event) => {
     if (!cb) return;
     pending.delete(msg.id);
     if (msg.ok) cb.resolve(msg.result);
-    else cb.reject(new Error(msg.error));
+    else cb.reject(Object.assign(new Error(msg.error), { step: `editor ${cb.op}` }));
 });
 
 function pageRequest(op, payload) {
     const id = nextId++;
     return new Promise((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        pending.set(id, { resolve, reject, op });
         window.postMessage({ type: REQ, id, op, payload }, '*');
     });
 }
@@ -159,6 +159,7 @@ function promptCommitMessage(btn) {
 async function commit(btn, message) {
     const original = 'Commit';
     btn.textContent = 'Committing…';
+    document.querySelector('[data-pybricks-git-error]')?.remove();
     btn.disabled = true;
     try {
         if (!(await ensureConfigured(btn, original))) return;
@@ -201,6 +202,7 @@ async function commit(btn, message) {
         setTimeout(() => (btn.textContent = original), 3000);
     } catch (err) {
         console.error('[pybricks-git] commit failed:', err);
+        showErrorPanel('Commit', err);
         btn.textContent = 'error';
         setTimeout(() => (btn.textContent = original), 3000);
     } finally {
@@ -240,6 +242,137 @@ function showCommitNotice(text) {
     box.addEventListener('click', () => box.remove());
     document.body.appendChild(box);
     setTimeout(() => box.remove(), 15000);
+}
+
+// The full story of a failed Commit or Pull. Errors from the service worker
+// carry its describeError report; anything that failed on this side (the
+// editor's IndexedDB, a dead extension context) gets the same shape built
+// here. Stays up until dismissed — the details are for a coach to read or
+// copy, and a 15-second toast is gone before anyone asks for them.
+function localErrorDetails(opName, err) {
+    const message = String((err && err.message) || err || 'unknown error');
+    let hint = null;
+    if (/context invalidated|receiving end does not exist|no response from the extension/i.test(message)) {
+        hint = 'The Pybricks Git extension was updated or restarted. Refresh this page and try again.';
+    } else if (err && err.step && err.step.startsWith('editor')) {
+        hint = "Couldn't read or write the editor's files. Refresh the page and try again.";
+    }
+    const lines = [`Operation: ${opName.toLowerCase()}`];
+    if (err && err.step) lines.push(`Step: ${err.step}`);
+    const kind = err && err.name && err.name !== 'Error' ? `${err.name}: ` : '';
+    lines.push(`Error: ${kind}${message}`);
+    if (err && err.stack) lines.push('', 'Stack:', String(err.stack));
+    return { message, hint, lines };
+}
+
+function showErrorPanel(opName, err) {
+    document.querySelector('[data-pybricks-git-error]')?.remove();
+    const details = (err && err.details) || localErrorDetails(opName, err);
+    const report = [
+        `${opName} failed — ${new Date().toISOString()}`,
+        `Pybricks Git v${chrome.runtime.getManifest().version}`,
+        `Page: ${location.href}`,
+        ...details.lines,
+    ].join('\n');
+
+    const box = document.createElement('div');
+    box.dataset.pybricksGitError = '1';
+    box.setAttribute('role', 'alert');
+    box.tabIndex = 0;
+    Object.assign(box.style, {
+        position: 'fixed',
+        top: '48px',
+        right: '12px',
+        width: '420px',
+        maxWidth: 'calc(100vw - 24px)',
+        maxHeight: 'calc(100vh - 72px)',
+        overflow: 'auto',
+        boxSizing: 'border-box',
+        padding: '10px 14px',
+        background: '#4a1414',
+        color: '#ffd6d6',
+        border: '1px solid #a33',
+        borderRadius: '4px',
+        font: 'inherit',
+        fontSize: '13px',
+        zIndex: 10001,
+    });
+
+    const title = document.createElement('div');
+    title.style.fontWeight = '600';
+    title.textContent = `${opName} failed: ${details.message}`;
+    box.appendChild(title);
+
+    if (details.hint) {
+        const hint = document.createElement('div');
+        hint.dataset.pybricksGitErrorHint = '1';
+        hint.style.marginTop = '6px';
+        hint.textContent = details.hint;
+        box.appendChild(hint);
+    }
+
+    const more = document.createElement('details');
+    more.style.marginTop = '8px';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Show details';
+    summary.style.cursor = 'pointer';
+    const pre = document.createElement('pre');
+    pre.dataset.pybricksGitErrorDetails = '1';
+    Object.assign(pre.style, {
+        margin: '6px 0 0',
+        padding: '6px',
+        maxHeight: '240px',
+        overflow: 'auto',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word',
+        background: '#2a0b0b',
+        font: '11px monospace',
+        userSelect: 'text',
+    });
+    pre.textContent = report;
+    more.append(summary, pre);
+    box.appendChild(more);
+
+    const actions = document.createElement('div');
+    actions.style.marginTop = '8px';
+    const button = (label) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        Object.assign(b.style, {
+            marginRight: '8px',
+            padding: '3px 10px',
+            background: '#6b1f1f',
+            color: '#ffd6d6',
+            border: '1px solid #a33',
+            borderRadius: '3px',
+            cursor: 'pointer',
+            font: 'inherit',
+        });
+        return b;
+    };
+    const copy = button('Copy details');
+    copy.dataset.pybricksGitErrorCopy = '1';
+    copy.addEventListener('click', async () => {
+        try {
+            await navigator.clipboard.writeText(report);
+            copy.textContent = 'Copied ✓';
+        } catch {
+            // Clipboard access can be refused; open the details so the text
+            // can be selected and copied by hand instead.
+            more.open = true;
+            copy.textContent = 'Select the text below to copy';
+        }
+    });
+    const dismiss = button('Dismiss');
+    dismiss.addEventListener('click', () => box.remove());
+    actions.append(copy, dismiss);
+    box.appendChild(actions);
+
+    box.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Escape') box.remove();
+    });
+    document.body.appendChild(box);
 }
 
 // Kid-facing report of what Pull rescued. Rendered on the page load *after*
@@ -298,6 +431,7 @@ async function sha256(text) {
 async function pull(btn) {
     const original = 'Pull';
     btn.textContent = 'Pulling…';
+    document.querySelector('[data-pybricks-git-error]')?.remove();
     btn.disabled = true;
     try {
         if (!(await ensureConfigured(btn, original))) return;
@@ -364,6 +498,7 @@ async function pull(btn) {
         }
     } catch (err) {
         console.error('[pybricks-git] pull failed:', err);
+        showErrorPanel('Pull', err);
         btn.textContent = 'error';
         setTimeout(() => (btn.textContent = original), 3000);
     } finally {
@@ -376,7 +511,8 @@ function serverRequest(op, payload = {}) {
         chrome.runtime.sendMessage({ op, ...payload }, (res) => {
             if (chrome.runtime.lastError) return reject(new Error(chrome.runtime.lastError.message));
             if (!res) return reject(new Error('no response from the extension service worker'));
-            if (res.error) return reject(new Error(res.error));
+            // details is the service worker's full report (see describeError).
+            if (res.error) return reject(Object.assign(new Error(res.error), { details: res.details }));
             resolve(res);
         });
     });

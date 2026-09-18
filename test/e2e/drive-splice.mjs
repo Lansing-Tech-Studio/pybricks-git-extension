@@ -100,8 +100,11 @@ function findChromium() {
     let best = null;
     for (const d of readdirSync(glob)) {
         if (!/^chromium-\d+$/.test(d)) continue;
-        const bin = join(glob, d, 'chrome-linux/chrome');
-        if (!existsSync(bin)) continue;
+        // Newer Playwright builds unpack to chrome-linux64/, older ones to chrome-linux/.
+        const bin = ['chrome-linux64/chrome', 'chrome-linux/chrome']
+            .map((sub) => join(glob, d, sub))
+            .find((p) => existsSync(p));
+        if (!bin) continue;
         const rev = parseInt(d.split('-')[1], 10);
         if (!best || rev > best.rev) best = { rev, bin };
     }

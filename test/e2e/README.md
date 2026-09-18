@@ -30,7 +30,7 @@ have to rediscover them:
 
 - **Playwright's Chromium, not branded Chrome.** Branded Google Chrome silently
   ignores `--load-extension`. The driver auto-locates the newest
-  `~/.cache/ms-playwright/chromium-<rev>/chrome-linux/chrome` (the
+  `~/.cache/ms-playwright/chromium-<rev>/chrome-linux64/chrome` (or `chrome-linux/` on older builds; the
   `chromium_headless_shell-*` builds and metadata-only rev dirs are skipped —
   they don't ship the branded binary). Install with `npx playwright install chromium`.
 - **Local Network Access gate.** Chrome ≥138 silently *hangs* `fetch()` to

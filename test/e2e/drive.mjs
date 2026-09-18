@@ -53,8 +53,11 @@ function findChromium() {
         // honors --load-extension; `chromium_headless_shell-*` does not, and
         // some rev dirs are metadata-only (no binary). Verify existence.
         if (!/^chromium-\d+$/.test(d)) continue;
-        const bin = join(glob, d, 'chrome-linux/chrome');
-        if (!existsSync(bin)) continue;
+        // Newer Playwright builds unpack to chrome-linux64/, older ones to chrome-linux/.
+        const bin = ['chrome-linux64/chrome', 'chrome-linux/chrome']
+            .map((sub) => join(glob, d, sub))
+            .find((p) => existsSync(p));
+        if (!bin) continue;
         const rev = parseInt(d.split('-')[1], 10);
         if (!best || rev > best.rev) best = { rev, bin };
     }
@@ -804,6 +807,32 @@ async function main() {
         assert(
             /keep\.py/.test(deleteNotice),
             'the skipped deletion is reported to the kid by name',
+        );
+
+        // -- A failed Pull explains itself -----------------------------------
+        // Point the extension at a repo the harness doesn't serve: the Pull
+        // must fail with the error panel (HTTP 404, the repo URL, a hint), not
+        // just a 3-second "error" label. No reload happens on failure.
+        step('7b', 'Pull against a missing repo shows the error panel with details');
+        await evalIsolated(
+            `storageGet('settings').then((s) => storageSet({ settings: { ...s, repoUrl: s.repoUrl.replace(/[^/]+$/, 'missing.git') } }))`,
+        );
+        await trustedClick(await buttonRect('Pull'));
+        const errorPanel = await poll(
+            () =>
+                evalIsolated(
+                    `(() => { const b = document.querySelector('[data-pybricks-git-error]'); return b ? { text: b.textContent, details: b.querySelector('[data-pybricks-git-error-details]').textContent } : null; })()`,
+                    false,
+                ),
+            { timeout: 30000, interval: 250, what: 'Pull error panel to render' },
+        );
+        log('error panel:', JSON.stringify(errorPanel.text));
+        assert(/Pull failed/.test(errorPanel.text), 'error panel names the failed op');
+        assert(/couldn't find the repo/.test(errorPanel.text), 'error panel shows the 404 hint');
+        assert(/HTTP status: 404/.test(errorPanel.details), 'error details include the HTTP status');
+        assert(/missing\.git/.test(errorPanel.details), 'error details include the repo URL');
+        await evalIsolated(
+            `(document.querySelector('[data-pybricks-git-error]').remove(), storageGet('settings').then((s) => storageSet({ settings: { ...s, repoUrl: ${JSON.stringify(repoUrl)} } })))`,
         );
 
         // -- Exceptions -----------------------------------------------------
