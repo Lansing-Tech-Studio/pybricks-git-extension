@@ -72,3 +72,55 @@ function planPull({ local, repo, base = {}, protectedPaths = [] }) {
     }
     return { files, rescued };
 }
+
+// --- Open-tab cleanup ---------------------------------------------------------
+//
+// Pybricks remembers open editor tabs in sessionStorage, as a JSON array of
+// file uuids under `editor.activeFileHistory.<window.name>.<editorId>`
+// (pybricks-code src/editor/lib.ts ActiveFileHistoryManager), and reopens each
+// on load. A uuid whose file a Pull deleted fails that reopen with an
+// "unexpected error" toast ("file with uuid '…' not found"). These helpers
+// find the uuids a Pull removes and plan pruning them from that history;
+// content.js does the sessionStorage reads and writes.
+
+const OPEN_TAB_HISTORY_PREFIX = 'editor.activeFileHistory.';
+
+// uuids of the editor's files that are absent from `keptPaths` — exactly what
+// apply-files deletes when handed a file set with those paths.
+//   metadata   [{path, uuid}]   the editor's metadata rows before the apply
+//   keptPaths  [path]           the paths passed to apply-files
+function deletedUuids(metadata, keptPaths) {
+    const kept = new Set(keptPaths);
+    return metadata.filter((m) => !kept.has(m.path)).map((m) => m.uuid);
+}
+
+// One history value with `uuids` removed. Returns the new JSON string, or null
+// when nothing changes (including a value that isn't a JSON array — Pybricks
+// itself treats that as empty, so it's left alone).
+function pruneTabHistory(value, uuids) {
+    let history;
+    try {
+        history = JSON.parse(value);
+    } catch {
+        return null;
+    }
+    if (!Array.isArray(history)) return null;
+    const drop = new Set(uuids);
+    const pruned = history.filter((u) => !drop.has(u));
+    return pruned.length === history.length ? null : JSON.stringify(pruned);
+}
+
+// Plans the rewrites for every open-tab history entry. `entries` is
+// [[key, value]] as read from sessionStorage by the caller (content.js does
+// the storage I/O; this stays pure). Returns [[key, newValue]] for just the
+// keys that change.
+function planTabPrunes(entries, uuids) {
+    if (!uuids.length) return [];
+    const writes = [];
+    for (const [key, value] of entries) {
+        if (typeof key !== 'string' || !key.startsWith(OPEN_TAB_HISTORY_PREFIX)) continue;
+        const next = pruneTabHistory(value, uuids);
+        if (next !== null) writes.push([key, next]);
+    }
+    return writes;
+}

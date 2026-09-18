@@ -79,8 +79,9 @@ have to rediscover them:
 8. **Merge on Pull.** Writes local edits straight into IndexedDB via
    `upsert-files` (a new `scratch.py`, an edited `starter.py`, an edited
    `coach.py`), pushes a competing commit to the bare repo
-   (`starter.py`/`keep.py`/`coach.py` changed, `gone.py` deleted), real-clicks
-   **Pull** again → asserts label `↓ +1 ~3 -1` → waits for reload → asserts the
+   (`starter.py`/`keep.py`/`coach.py` changed, `gone.py` deleted), opens
+   `keep.py` and `gone.py` as editor tabs (`editor.action.activateFile` on the
+   app's store), real-clicks **Pull** again → asserts label `↓ +1 ~3 -1` → waits for reload → asserts the
    rescue notice names `starter.py`/`starter_mine.py` and says nothing about the
    untouched `keep.py` or the protected `coach.py` → asserts the post-merge
    IndexedDB: `scratch.py` (never committed) survives untouched, `starter.py`
@@ -88,6 +89,11 @@ have to rediscover them:
    `starter_mine.py`, `keep.py` silently took the upstream version with no
    `keep_mine.py` sibling, `gone.py` is gone, and `coach.py` took the repo's
    version with **no** `coach_mine.py` — protection overwrites, never rescues.
+   **Open-tab cleanup:** once Pybricks has reopened its remembered tabs, asserts
+   no "file with uuid '…' not found" toast was shown (toasts are recorded from
+   page load, since they auto-dismiss after 5s), that `gone.py` left the
+   sessionStorage tab history, and that `keep.py` is still in it. (Verified by
+   disabling the prune in `content.js`: the toast assertion fails.)
 9. **Deletion freshness.** Pushes another competing `keep.py`, deletes `keep.py`
    from IndexedDB (`apply-files` with it withheld), real-clicks **Commit** →
    asserts the push succeeded, the bare repo still holds the teammate's
@@ -138,6 +144,9 @@ driver's own comments use for it:
 [e2e] PASS: exactly one keep.py in the editor
 [e2e] PASS: no keep_mine.py sibling for the untouched file
 [e2e] PASS: untouched gone.py went away with the upstream deletion
+[e2e] PASS: no "file … not found" toast after the reload ([])
+[e2e] PASS: the deleted gone.py left Pybricks' open-tab history
+[e2e] PASS: the kept keep.py is still a remembered tab
 [e2e] PASS: the protected coach.py took the repo's version despite the local edit
 [e2e] PASS: a protected file is overwritten with no rescue copy
 

@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPullMerge } from './load-pullmerge.mjs';
 
-const { rescueName, planPull } = loadPullMerge();
+const { rescueName, planPull, deletedUuids, pruneTabHistory, planTabPrunes } = loadPullMerge();
 
 describe('rescueName', () => {
     test('inserts _mine before the extension', () => {
@@ -190,5 +190,45 @@ describe('planPull', () => {
         });
         assert.deepEqual(files, []);
         assert.deepEqual(rescued, []);
+    });
+});
+
+describe('open-tab cleanup', () => {
+    test('deletedUuids names the files missing from the kept set', () => {
+        const meta = [
+            { path: 'a.py', uuid: 'u-a' },
+            { path: 'gone.py', uuid: 'u-gone' },
+            { path: 'b.py', uuid: 'u-b' },
+        ];
+        assert.deepEqual(deletedUuids(meta, ['a.py', 'b.py', 'new.py']), ['u-gone']);
+        assert.deepEqual(deletedUuids(meta, ['a.py', 'gone.py', 'b.py']), []);
+    });
+
+    test('pruneTabHistory drops deleted uuids and keeps order', () => {
+        assert.equal(pruneTabHistory('["u-a","u-gone","u-b"]', ['u-gone']), '["u-a","u-b"]');
+        assert.equal(pruneTabHistory('["u-gone"]', ['u-gone']), '[]');
+    });
+
+    test('pruneTabHistory returns null when nothing changes or the value is not an array', () => {
+        assert.equal(pruneTabHistory('["u-a"]', ['u-gone']), null);
+        assert.equal(pruneTabHistory('not json', ['u-gone']), null);
+        assert.equal(pruneTabHistory('{"u-gone":1}', ['u-gone']), null);
+        assert.equal(pruneTabHistory(null, ['u-gone']), null);
+    });
+
+    test('planTabPrunes rewrites only open-tab history keys that change', () => {
+        const entries = [
+            ['activities.selectedActivity', '"activity.explorer"'],
+            ['editor.activeFileHistory.win1.vs.editor.ICodeEditor:1', '["u-a","u-gone"]'],
+            ['editor.activeFileHistory.win1.vs.editor.ICodeEditor:2', '["u-b"]'],
+            ['other.key', '["u-gone"]'],
+        ];
+        assert.deepEqual(planTabPrunes(entries, ['u-gone']), [
+            ['editor.activeFileHistory.win1.vs.editor.ICodeEditor:1', '["u-a"]'],
+        ]);
+    });
+
+    test('planTabPrunes plans nothing with no deleted uuids', () => {
+        assert.deepEqual(planTabPrunes([['editor.activeFileHistory.w.e', '["u-a"]']], []), []);
     });
 });
