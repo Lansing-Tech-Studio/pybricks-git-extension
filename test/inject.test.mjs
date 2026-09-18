@@ -576,6 +576,42 @@ describe('writeFilesLive', () => {
         assert.equal(store.editor.activeFileUuid, 'u-prog');
     });
 
+    test('reopening a block tab does not steal focus from an unaffected active file', async () => {
+        const db = await openPybricks();
+        const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';
+        await seed(db, [
+            { path: 'prog.py', contents: BLOCKS + 'v1\n', uuid: 'u-prog' },
+            { path: 'other.py', contents: 'o\n', uuid: 'u-other' },
+        ]);
+        const store = fakeStore({ openFileUuids: ['u-prog', 'u-other'], activeFileUuid: 'u-other', db });
+        const res = await writeFilesLive({
+            files: [{ path: 'prog.py', contents: BLOCKS + 'v2\n' }],
+            rootEl: fakeRoot(store),
+        });
+        assert.equal(res.live, true);
+        assert.deepEqual(new Set(store.editor.openFileUuids), new Set(['u-prog', 'u-other']));
+        assert.equal(store.editor.activeFileUuid, 'u-other', 'focus went back to the unaffected file');
+    });
+
+    test('a block tab that will not reopen is reported, and the write still counts as live', async () => {
+        const db = await openPybricks();
+        const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';
+        await seed(db, [{ path: 'prog.py', contents: BLOCKS + 'v1\n', uuid: 'u-prog' }]);
+        const store = fakeStore({
+            openFileUuids: ['u-prog'],
+            // Everything works except reopening (activateFile is swallowed).
+            onDispatch: (a) => (a.type === 'editor.action.activateFile' ? undefined : actLikePybricks(a, db, store.editor)),
+        });
+        const res = await writeFilesLive({
+            files: [{ path: 'prog.py', contents: BLOCKS + 'v2\n' }],
+            rootEl: fakeRoot(store),
+            timeoutMs: 300,
+        });
+        assert.equal(res.live, true, 'the files are written and verified — no reason to fall back');
+        assert.deepEqual(res.tabsNotReopened, ['u-prog']);
+        assert.equal((await snapshot(db)).byPath['prog.py'], BLOCKS + 'v2\n');
+    });
+
     test('closed block tabs are reopened even when the write is not confirmed', async () => {
         const db = await openPybricks();
         const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';

@@ -325,13 +325,14 @@ async function liveWriteAttempt(store, files, deleteUnlisted, timeoutMs) {
     const { editor } = store.getState();
     const plan = planLiveWrites({ files: wanted, before, openFileUuids: editor.openFileUuids, deleteUnlisted });
     const openNow = () => store.getState().editor.openFileUuids;
+    let result;
     try {
         for (const uuid of plan.close) store.dispatch({ type: 'editor.action.closeFile', uuid });
         const closed = await waitUntil(
             () => plan.close.every((u) => !openNow().includes(u)),
             Date.now() + timeoutMs,
         );
-        if (!closed) return { live: false, reason: 'Pybricks did not close the affected tabs in time' };
+        if (!closed) return (result = { live: false, reason: 'Pybricks did not close the affected tabs in time' });
 
         for (const action of [...plan.writes, ...plan.deletes]) store.dispatch(action);
 
@@ -345,30 +346,43 @@ async function liveWriteAttempt(store, files, deleteUnlisted, timeoutMs) {
                 gone.every((p) => !byPath.has(p) && !shaByPath.has(p))
             );
         }, Date.now() + timeoutMs);
-        if (!confirmed) return { live: false, reason: 'Pybricks did not confirm the write in time' };
-        return {
+        if (!confirmed) return (result = { live: false, reason: 'Pybricks did not confirm the write in time' });
+        result = {
             live: true,
             dispatched: plan.writes.length + plan.deletes.length,
             summary: plan.summary,
         };
+        return result;
     } finally {
-        // Best effort, success or not: bring back the block tabs we closed,
-        // one at a time so the originally active file ends up active again.
-        await reopenTabs(store, plan.reopen, editor.activeFileUuid, timeoutMs);
+        // Best effort, success or not: bring back the block tabs we closed and
+        // put focus back where it was. A tab that won't reopen is reported,
+        // not treated as a failed write: the files are written and verified,
+        // and the raw fallback's reload couldn't restore the tab either (the
+        // close already dropped it from Pybricks' remembered tabs).
+        const missing = await reopenTabs(store, plan.reopen, editor.activeFileUuid, timeoutMs);
+        if (missing.length && result && result.live) result.tabsNotReopened = missing;
     }
 }
 
+// Reopens `uuids` one at a time, then restores `activeUuid` as the active tab
+// (reopening a tab activates it, which would otherwise steal focus from an
+// unaffected file). Resolves the uuids that did not reopen.
 async function reopenTabs(store, uuids, activeUuid, timeoutMs) {
-    const order = uuids.includes(activeUuid)
-        ? [...uuids.filter((u) => u !== activeUuid), activeUuid]
-        : uuids;
-    for (const uuid of order) {
+    const missing = [];
+    for (const uuid of uuids) {
         store.dispatch({ type: 'editor.action.activateFile', uuid });
-        await waitUntil(
+        const reopened = await waitUntil(
             () => store.getState().editor.openFileUuids.includes(uuid),
             Date.now() + timeoutMs,
         );
+        if (!reopened) missing.push(uuid);
     }
+    const { editor } = store.getState();
+    if (uuids.length && activeUuid && editor.openFileUuids.includes(activeUuid) && editor.activeFileUuid !== activeUuid) {
+        store.dispatch({ type: 'editor.action.activateFile', uuid: activeUuid });
+        await waitUntil(() => store.getState().editor.activeFileUuid === activeUuid, Date.now() + timeoutMs);
+    }
+    return missing;
 }
 
 async function readStores() {

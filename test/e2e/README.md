@@ -392,7 +392,10 @@ identical), `prog_differs.py` (one motor port changed → splices cleanly), and
    and is still active (open block programs are closed, written and reopened,
    never replaced under a live Blockly workspace). Without a licence, the
    reopened tab brings back the "Enable block coding" dialog (a reload restoring
-   the tab did too), so the driver dismisses it. Then it asserts the
+   the tab did too), so the driver dismisses it with its × button. Any *other*
+   dialog fails the run instead of being dismissed unseen. The × gets a DOM
+   click: Escape doesn't work because focus sits on `<body>`, and a coordinate
+   click can land while the dialog is still animating in. Then it asserts the
    **snapshot-first rail** harness-side — the remote gained a `Before robot setup
    update` commit whose tree holds the **PRE-splice** `prog_differs.py` setup
    (compared by `setupSignature`, not bytes: opening the file made the editor

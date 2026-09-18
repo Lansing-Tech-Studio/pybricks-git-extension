@@ -357,6 +357,25 @@ async function main() {
             if (r.exceptionDetails) throw new Error('main eval threw: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text));
             return r.result.value;
         };
+        // Dismisses Pybricks' "Enable block coding" dialog if it is up (no
+        // licence + a block tab opened). Any OTHER dialog fails the run rather
+        // than being Escaped away unseen.
+        const dismissLicenceDialog = async (after) => {
+            const title = await poll(
+                () => evalMain(`document.querySelector('.bp5-dialog .bp5-heading')?.textContent ?? ''`).then((t) => t || null),
+                { timeout: 3000, interval: 200, what: 'a dialog' },
+            ).catch(() => null);
+            log(`dialog after ${after} =`, JSON.stringify(title));
+            if (!title) return;
+            assert(/^Enable block coding$/.test(title.trim()), `only the expected licence dialog after ${after} (got "${title}")`);
+            // Its Close (×) button, not Escape: focus sits on <body>, where
+            // Blueprint never sees the key. A DOM click, not a trusted one: the
+            // dialog animates in (the button measured 18px, then 30px), and a
+            // coordinate click landed mid-animation did nothing. This dismisses
+            // a third-party dialog; it isn't simulating the kid.
+            await evalMain(`document.querySelector('.bp5-dialog .bp5-dialog-close-button').click()`);
+            await poll(() => evalMain(`!document.querySelector('.bp5-dialog')`), { timeout: 5000, what: 'the licence dialog to close' });
+        };
         await trustedClick(await buttonRect('Pull'));
         const pullLabel = await poll(
             async () => {
@@ -434,8 +453,9 @@ async function main() {
             what: 'prog_differs.py to open in a tab',
         });
         // Without a licence Pybricks pops "Enable block coding" over a block
-        // file; dismiss it so it can't block the panel click.
-        for (const type of ['keyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, windowsVirtualKeyCode: 27, key: 'Escape', code: 'Escape' });
+        // file; dismiss it so it can't block the panel click. Only that dialog:
+        // anything else would be an error, and Escape would hide it.
+        await dismissLicenceDialog('opening prog_differs.py');
         await clickSelector('[data-pybricks-git-update-setup]', 'Update robot setup button');
         const updateStatus = await poll(
             () => evalIsolated(`(() => { const s=document.querySelector('[data-pybricks-git-status]'); return s && /^Updated|Couldn|Saved the snapshot/.test(s.textContent) ? s.textContent : null; })()`, false),
@@ -451,12 +471,7 @@ async function main() {
         // Reopening the block tab brings back the licence dialog when there's
         // no licence — exactly what the old reload did when it restored the
         // tab. Dismiss it so it can't swallow later clicks.
-        const dialogTitle = await evalMain(`document.querySelector('.bp5-dialog .bp5-heading')?.textContent ?? null`);
-        log('dialog after Update =', JSON.stringify(dialogTitle));
-        if (dialogTitle) {
-            for (const type of ['keyDown', 'keyUp']) await page.send('Input.dispatchKeyEvent', { type, windowsVirtualKeyCode: 27, key: 'Escape', code: 'Escape' });
-            await poll(() => evalMain(`!document.querySelector('.bp5-dialog')`), { timeout: 5000, what: 'the dialog to close' });
-        }
+        await dismissLicenceDialog('Update robot setup');
 
         // -- Snapshot-first + report ----------------------------------------
         step(8, 'Assert snapshot-first commit + splice report + editor outcomes');

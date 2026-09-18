@@ -51,7 +51,7 @@ Until a Client ID is set, `GITHUB_CLIENT_ID` is empty: **Sign in with GitHub** s
 | Action | What it does |
 |---|---|
 | Click **Commit** | Opens a message input under the button — **Enter** commits (blank message = timestamped default), **Escape** cancels. The extension fetches the fork's head, builds a commit from the editor's files, and pushes it. Button shows `✓ <short-sha> ↑` (committed and pushed), `no changes`, `setup needed` (extension not configured yet), or `error` (see the console). |
-| Click **Pull** | The extension fetches the fork and applies its files into the editor. Button shows `↓ +N ~N -N` (added / changed / deleted), or `nothing to pull` when the fork has no commits on the configured branch yet (nothing is applied in that case). When anything changed, the page reloads so the editor picks up the new files. |
+| Click **Pull** | The extension fetches the fork and applies its files into the editor. Button shows `↓ +N ~N -N` (added / changed / deleted), or `nothing to pull` when the fork has no commits on the configured branch yet (nothing is applied in that case). The editor updates in place without reloading the page, so the hub stays connected. (Only if the extension can't drive the editor does it fall back to reloading the page.) |
 
 ## Shared-code updates
 

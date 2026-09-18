@@ -939,7 +939,12 @@ function makeMenuPanel(deps) {
         } catch (err) {
             live = { live: false, reason: err.message };
         }
-        if (live.live) return { reloading: false };
+        if (live.live) {
+            if (live.tabsNotReopened) {
+                console.warn('[pybricks-git] some block-program tabs were left closed:', live.tabsNotReopened);
+            }
+            return { reloading: false };
+        }
         console.warn('[pybricks-git] live write unavailable, reloading instead:', live.reason);
         await pageRequest('upsert-files', { files });
         await persist(true);

@@ -498,6 +498,9 @@ async function pull(btn) {
         let goneUuids = [];
         if (live.live) {
             summary = live.summary;
+            if (live.tabsNotReopened) {
+                console.warn('[pybricks-git] Pull left some block-program tabs closed:', live.tabsNotReopened);
+            }
         } else {
             console.warn('[pybricks-git] live Pull unavailable, reloading instead:', live.reason);
             // The files apply-files is about to delete — their uuids must also
