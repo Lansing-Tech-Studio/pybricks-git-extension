@@ -240,7 +240,16 @@ function planLiveWrites(files, metadata, openFileUuids) {
 async function writeFilesLive({ files, timeoutMs = LIVE_WRITE_TIMEOUT_MS, rootEl } = {}) {
     const store = findAppStore(rootEl);
     if (!store) return { live: false, reason: 'Pybricks app store not found' };
+    // Never reject: a throw from hashing, IDB, or the app's own reducers is
+    // just another reason to fall back.
+    try {
+        return await liveWriteAttempt(store, files, timeoutMs);
+    } catch (err) {
+        return { live: false, reason: `Pybricks could not save the file this way: ${err && err.message ? err.message : err}` };
+    }
+}
 
+async function liveWriteAttempt(store, files, timeoutMs) {
     const wanted = await Promise.all(
         files.map(async (f) => ({ path: f.path, contents: f.contents, sha: await sha256(f.contents) })),
     );

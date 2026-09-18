@@ -461,6 +461,32 @@ describe('writeFilesLive', () => {
         assert.equal((await snapshot(db)).byPath['menu_config.py'], 'old\n', 'nothing written behind the app');
     });
 
+    test('a throwing dispatch resolves live:false instead of rejecting', async () => {
+        const db = await openPybricks();
+        await seed(db, [{ path: 'menu_config.py', contents: 'old\n', uuid: 'u-menu' }]);
+        const store = fakeStore({
+            onDispatch: () => {
+                throw new Error('reducer exploded');
+            },
+        });
+        const res = await writeFilesLive({
+            files: [{ path: 'menu_config.py', contents: 'new\n' }],
+            rootEl: fakeRoot(store),
+        });
+        assert.equal(res.live, false);
+        assert.match(res.reason, /could not save the file this way: reducer exploded/);
+    });
+
+    test('a missing Pybricks database resolves live:false instead of rejecting', async () => {
+        // Fresh IDBFactory from beforeEach: no DB with metadata/_contents exists.
+        const res = await writeFilesLive({
+            files: [{ path: 'menu_config.py', contents: 'new\n' }],
+            rootEl: fakeRoot(fakeStore()),
+        });
+        assert.equal(res.live, false);
+        assert.match(res.reason, /no Pybricks IndexedDB found/);
+    });
+
     test('reports live:false without touching IndexedDB when no store is found', async () => {
         const res = await writeFilesLive({ files: [{ path: 'a.py', contents: 'a' }], rootEl: {} });
         assert.deepEqual(res, { live: false, reason: 'Pybricks app store not found' });

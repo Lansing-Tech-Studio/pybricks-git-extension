@@ -226,6 +226,11 @@ plain `mission_01.py`, and a setup-only **blocks** file `arm_moves.py` — then:
    waits for Pybricks to persist it. The persisted file must still hold all
    **3** slots: a stale Monaco model would write back the 2-slot copy. (Verified
    by breaking the open-tab branch of `planLiveWrites`: this assertion fails.)
+5c. Clicks Save and a slot's ▲ in the same synchronous tick, so the move lands
+   while the write is in flight. Asserts Save reports "changed while saving",
+   stays enabled, the panel keeps the move, the file holds the pre-move
+   version, and a second Save persists the move. (Verified by disabling the
+   revision check in `saveConfig`: this step fails.)
 6. **Commit**s (trusted-typed message, Enter) → asserts the label reaches
    `✓ <sha> ↑`, then harness-side: the pushed `menu_config.py` carries the
    `arm_moves` line and `menu.py` is **byte-identical to the seed** (protection
@@ -259,6 +264,12 @@ Recorded from a real passing run (Chromium 1228):
 [e2e-menu] PASS: the page did not reload after the second Save
 [e2e-menu] PASS: menu_config.py holds 3 slots after the second Save ({"error":null,"len":3})
 [e2e-menu] PASS: typing in the open tab kept all 3 saved slots ({"error":null,"len":3})
+[e2e-menu] PASS: Save reports that the menu changed while saving
+[e2e-menu] PASS: Save stays enabled for the unsaved move
+[e2e-menu] PASS: the mid-save move is still in the panel (slot 2 = "≡3mission_01 (whole program)▲▼✕")
+[e2e-menu] PASS: the file holds the version saved before the move (toggle yes, move no)
+[e2e-menu] PASS: the second Save persisted the move (…)
+[e2e-menu] PASS: still no reload after the in-flight edit and second Save
 [e2e-menu] PASS: commit label shows "✓ <sha> ↑" (got "✓ c95a7d9 ↑")
 [e2e-menu] PASS: pushed menu_config.py contains the arm_moves slot line
 [e2e-menu] PASS: protected menu.py is byte-identical to the seed (protection held end-to-end)

@@ -731,6 +731,61 @@ async function main() {
             `typing in the open tab kept all 3 saved slots (${JSON.stringify(parsedAfter)})`,
         );
 
+        // -- An edit made while a save is in flight is kept ----------------
+        // Save and a slot move in the same synchronous tick: saveConfig runs up
+        // to its first await (the write-files-live round-trip), then the move
+        // lands mid-save. The earlier version is written, the move must stay in
+        // the panel (still unsaved), and a second Save must persist it.
+        step('7c', 'A slot move made while Save is in flight is kept, not overwritten');
+        await evalIsolated(
+            `document.querySelector('[data-pybricks-git-slot="2"] [data-pybricks-git-slot-enabled]').click()`,
+            false,
+        );
+        await evalIsolated(
+            `(() => { document.querySelector('[data-pybricks-git-save]').click(); document.querySelector('[data-pybricks-git-slot="2"] [data-pybricks-git-slot-up]').click(); })()`,
+            false,
+        );
+        const raceStatus = await poll(
+            () =>
+                evalIsolated(
+                    `(() => { const s = document.querySelector('[data-pybricks-git-status]'); return s && /^Saved|failed/.test(s.textContent) ? s.textContent : null; })()`,
+                    false,
+                ),
+            { timeout: 15000, interval: 100, what: 'Save status (edit in flight)' },
+        );
+        log('in-flight save status =', JSON.stringify(raceStatus));
+        assert(/changed while saving/.test(raceStatus), 'Save reports that the menu changed while saving');
+        const raceUi = await evalIsolated(
+            `(() => ({ saveEnabled: !document.querySelector('[data-pybricks-git-save]').disabled, slot1: document.querySelector('[data-pybricks-git-slot="1"]').textContent }))()`,
+            false,
+        );
+        assert(raceUi.saveEnabled, 'Save stays enabled for the unsaved move');
+        assert(/mission_01 \(whole program\)/.test(raceUi.slot1), `the mid-save move is still in the panel (slot 2 = ${JSON.stringify(raceUi.slot1)})`);
+        const midItems = await evalIsolated(
+            `pageRequest('list-files').then((l) => parseMenuConfig(l.contents.find((c) => c.path === 'menu_config.py').contents).items)`,
+        );
+        assert(
+            midItems[1].module === 'arm_moves' && midItems[2].enabled === false,
+            'the file holds the version saved before the move (toggle yes, move no)',
+        );
+        await clickSelector('[data-pybricks-git-save]', 'Save button (second save)');
+        await poll(
+            () =>
+                evalIsolated(
+                    `document.querySelector('[data-pybricks-git-status]')?.textContent === 'Saved ✓'`,
+                    false,
+                ),
+            { timeout: 15000, interval: 100, what: 'second Save to finish' },
+        );
+        const finalItems = await evalIsolated(
+            `pageRequest('list-files').then((l) => parseMenuConfig(l.contents.find((c) => c.path === 'menu_config.py').contents).items)`,
+        );
+        assert(
+            finalItems.length === 3 && finalItems[1].module === 'mission_01' && !finalItems[1].function && finalItems[1].enabled === false,
+            `the second Save persisted the move (${JSON.stringify(finalItems)})`,
+        );
+        assert(isolatedCtx === ctxBeforeSave, 'still no reload after the in-flight edit and second Save');
+
         // -- Commit ---------------------------------------------------------
         step(8, 'Commit; assert the push landed menu_config.py, menu.py untouched');
         const commitPt = await buttonRect('Commit');

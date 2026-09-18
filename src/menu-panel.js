@@ -24,6 +24,11 @@ function makeMenuPanel(deps) {
     // Removes the popover plus its capture-phase window listeners; close() and
     // a reopen both route through it so nothing leaks (see openDisplayEditor).
     let displayEditorDismiss = null;
+    // Bumped by every slot edit (all of them go through markDirty). Save
+    // compares it across its awaits: the slot controls stay live while a save
+    // is in flight, and an edit made then must not be overwritten by the
+    // post-save refresh or discarded by the fallback reload.
+    let editRevision = 0;
 
     async function toggle() {
         if (panel) close();
@@ -680,6 +685,7 @@ function makeMenuPanel(deps) {
     }
 
     function markDirty() {
+        editRevision++;
         state.dirty = true;
         render();
     }
@@ -908,6 +914,7 @@ function makeMenuPanel(deps) {
         }
         saveBtn.disabled = true;
         setStatus('Saving…');
+        const savedRevision = editRevision;
         const files = [{ path: state.menuConfigPath, contents: generateMenuConfig(state.items) }];
         let live;
         try {
@@ -916,6 +923,14 @@ function makeMenuPanel(deps) {
             live = { live: false, reason: err.message };
         }
         if (live.live) {
+            if (editRevision !== savedRevision) {
+                // The earlier version is saved, but the slots changed since.
+                // Keep the newer edits (still dirty) instead of refreshing
+                // over them.
+                render();
+                setStatus('Saved — but the menu changed while saving. Save again to keep those changes.');
+                return;
+            }
             try {
                 state = await loadState();
             } catch (err) {
@@ -930,8 +945,26 @@ function makeMenuPanel(deps) {
             return;
         }
         console.warn('[pybricks-git] live menu save unavailable, reloading instead:', live.reason);
+        // The fallback reload would discard any edit made while the live
+        // attempt ran, so write the slots as they are NOW.
+        for (const [i, item] of state.items.entries()) {
+            const problem = validateItem(item);
+            if (problem) {
+                setStatus(`Slot ${i + 1}: ${problem}`);
+                saveBtn.disabled = false;
+                return;
+            }
+        }
+        const fallbackRevision = editRevision;
         try {
-            await pageRequest('upsert-files', { files });
+            await pageRequest('upsert-files', {
+                files: [{ path: state.menuConfigPath, contents: generateMenuConfig(state.items) }],
+            });
+            if (editRevision !== fallbackRevision) {
+                setStatus('Saved — but the menu changed while saving. Save again to keep those changes.');
+                saveBtn.disabled = false;
+                return;
+            }
             await persist(true);
             setStatus('Saved ✓ — reloading…');
             setTimeout(() => reload(), 800);
