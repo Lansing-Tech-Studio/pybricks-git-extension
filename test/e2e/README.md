@@ -231,6 +231,11 @@ plain `mission_01.py`, and a setup-only **blocks** file `arm_moves.py` — then:
    stays enabled, the panel keeps the move, the file holds the pre-move
    version, and a second Save persists the move. (Verified by disabling the
    revision check in `saveConfig`: this step fails.)
+5d. Forces the **fallback** by setting the MAIN-world `findAppStore = () => null`.
+   A Save then schedules its reload, and a slot move during the 800 ms pause must
+   **cancel** it and ask for another Save. A clean fallback Save must reload
+   (the panel reopens from the `open` flag) and persist the newest slots. (Verified
+   by making the pause always reload: this step fails.)
 6. **Commit**s (trusted-typed message, Enter) → asserts the label reaches
    `✓ <sha> ↑`, then harness-side: the pushed `menu_config.py` carries the
    `arm_moves` line and `menu.py` is **byte-identical to the seed** (protection
@@ -270,6 +275,9 @@ Recorded from a real passing run (Chromium 1228):
 [e2e-menu] PASS: the file holds the version saved before the move (toggle yes, move no)
 [e2e-menu] PASS: the second Save persisted the move (…)
 [e2e-menu] PASS: still no reload after the in-flight edit and second Save
+[e2e-menu] PASS: an edit during the pause cancelled the fallback reload
+[e2e-menu] PASS: the cancelled reload asks for another Save (…)
+[e2e-menu] PASS: the fallback Save persisted the newest slots, incl. the mid-pause move (…)
 [e2e-menu] PASS: commit label shows "✓ <sha> ↑" (got "✓ c95a7d9 ↑")
 [e2e-menu] PASS: pushed menu_config.py contains the arm_moves slot line
 [e2e-menu] PASS: protected menu.py is byte-identical to the seed (protection held end-to-end)

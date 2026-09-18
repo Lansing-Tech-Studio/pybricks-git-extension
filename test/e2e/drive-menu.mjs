@@ -786,6 +786,59 @@ async function main() {
         );
         assert(isolatedCtx === ctxBeforeSave, 'still no reload after the in-flight edit and second Save');
 
+        // -- Fallback path: no store → raw write + reload ------------------
+        // Hide the app store (inject.js's findAppStore is a MAIN-world global)
+        // so write-files-live resolves {live:false} and Save falls back. First
+        // an edit during the 800ms pre-reload pause must cancel the reload;
+        // then a clean fallback Save must reload and persist the latest slots.
+        step('7d', 'Fallback Save: an edit during the reload pause cancels it; a clean one reloads');
+        await evalMain(`findAppStore = () => null`);
+        await evalIsolated(
+            `document.querySelector('[data-pybricks-git-slot="0"] [data-pybricks-git-slot-enabled]').click()`,
+            false,
+        );
+        await clickSelector('[data-pybricks-git-save]', 'Save button (fallback)');
+        await poll(
+            () =>
+                evalIsolated(
+                    `/reloading/.test(document.querySelector('[data-pybricks-git-status]')?.textContent || '')`,
+                    false,
+                ),
+            { timeout: 15000, interval: 50, what: 'fallback Save to schedule its reload' },
+        );
+        await evalIsolated(
+            `document.querySelector('[data-pybricks-git-slot="2"] [data-pybricks-git-slot-up]').click()`,
+            false,
+        );
+        await sleep(1500);
+        assert(isolatedCtx === ctxBeforeSave, 'an edit during the pause cancelled the fallback reload');
+        const pauseUi = await evalIsolated(
+            `(() => ({ status: document.querySelector('[data-pybricks-git-status]').textContent, saveEnabled: !document.querySelector('[data-pybricks-git-save]').disabled }))()`,
+            false,
+        );
+        assert(
+            /changed while saving/.test(pauseUi.status) && pauseUi.saveEnabled,
+            `the cancelled reload asks for another Save (${JSON.stringify(pauseUi)})`,
+        );
+        await clickSelector('[data-pybricks-git-save]', 'Save button (fallback, clean)');
+        await poll(() => isolatedCtx === null || isolatedCtx !== ctxBeforeSave, {
+            timeout: 15000,
+            what: 'the fallback Save to reload the page',
+        });
+        await poll(() => exists('[data-pybricks-git-panel]'), {
+            timeout: 40000,
+            what: 'menu panel to reopen after the fallback reload',
+        });
+        const fallbackItems = await evalIsolated(
+            `pageRequest('list-files').then((l) => parseMenuConfig(l.contents.find((c) => c.path === 'menu_config.py').contents).items)`,
+        );
+        assert(
+            fallbackItems.length === 3 &&
+                fallbackItems[0].enabled === false &&
+                fallbackItems[1].module === 'arm_moves',
+            `the fallback Save persisted the newest slots, incl. the mid-pause move (${JSON.stringify(fallbackItems)})`,
+        );
+
         // -- Commit ---------------------------------------------------------
         step(8, 'Commit; assert the push landed menu_config.py, menu.py untouched');
         const commitPt = await buttonRect('Commit');

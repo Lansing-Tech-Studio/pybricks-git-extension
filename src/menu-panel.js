@@ -29,6 +29,10 @@ function makeMenuPanel(deps) {
     // is in flight, and an edit made then must not be overwritten by the
     // post-save refresh or discarded by the fallback reload.
     let editRevision = 0;
+    // True from a Save click until it settles (and through a pending fallback
+    // reload). An edit mid-save re-renders the footer, and the Save button it
+    // draws must stay disabled so two saves can't race.
+    let saving = false;
 
     async function toggle() {
         if (panel) close();
@@ -313,9 +317,9 @@ function makeMenuPanel(deps) {
         const save = document.createElement('button');
         save.dataset.pybricksGitSave = '1';
         save.textContent = state.dirty ? 'Save menu' : 'Saved';
-        save.disabled = !state.dirty;
+        save.disabled = !state.dirty || saving;
         styleMiniButton(save);
-        save.addEventListener('click', () => void saveConfig(save));
+        save.addEventListener('click', () => void saveConfig());
         if (state.teamSetup) {
             const newBtn = miniIconButton(
                 '+ New program',
@@ -904,17 +908,38 @@ function makeMenuPanel(deps) {
     // a raw write dexie-observable sees nothing, and an open menu_config.py tab
     // would clobber the save on its next write. The persisted open flag
     // reopens the panel after that reload.
-    async function saveConfig(saveBtn) {
+    async function saveConfig() {
+        if (saving) return;
+        saving = true;
+        let reloading = false;
+        try {
+            reloading = await doSave();
+        } finally {
+            // A scheduled reload keeps Save disabled until the page goes away.
+            saving = reloading;
+            const btn = panel && panel.querySelector('[data-pybricks-git-save]');
+            if (btn) btn.disabled = !state.dirty || saving;
+        }
+    }
+
+    // Resolves true when it has scheduled the fallback reload.
+    async function doSave() {
         for (const [i, item] of state.items.entries()) {
             const problem = validateItem(item);
             if (problem) {
                 setStatus(`Slot ${i + 1}: ${problem}`);
-                return;
+                return false;
             }
         }
-        saveBtn.disabled = true;
         setStatus('Saving…');
         const savedRevision = editRevision;
+        // Every await below is a window for a slot edit; re-check after each.
+        const changedSince = (rev) => {
+            if (editRevision === rev) return false;
+            render(); // the newer slots, still dirty, with Save enabled
+            setStatus('Saved — but the menu changed while saving. Save again to keep those changes.');
+            return true;
+        };
         const files = [{ path: state.menuConfigPath, contents: generateMenuConfig(state.items) }];
         let live;
         try {
@@ -923,17 +948,15 @@ function makeMenuPanel(deps) {
             live = { live: false, reason: err.message };
         }
         if (live.live) {
-            if (editRevision !== savedRevision) {
-                // The earlier version is saved, but the slots changed since.
-                // Keep the newer edits (still dirty) instead of refreshing
-                // over them.
-                render();
-                setStatus('Saved — but the menu changed while saving. Save again to keep those changes.');
-                return;
-            }
+            // The earlier version is saved, but if the slots changed since,
+            // keep the newer edits instead of refreshing over them.
+            if (changedSince(savedRevision)) return false;
             try {
-                state = await loadState();
+                const refreshed = await loadState();
+                if (changedSince(savedRevision)) return false;
+                state = refreshed;
             } catch (err) {
+                if (changedSince(savedRevision)) return false;
                 // The file is saved; only the panel refresh failed. Keep the
                 // edited slots but mark them clean.
                 console.warn('[pybricks-git] menu panel refresh after save failed:', err);
@@ -942,7 +965,7 @@ function makeMenuPanel(deps) {
             }
             render();
             setStatus('Saved ✓');
-            return;
+            return false;
         }
         console.warn('[pybricks-git] live menu save unavailable, reloading instead:', live.reason);
         // The fallback reload would discard any edit made while the live
@@ -951,8 +974,7 @@ function makeMenuPanel(deps) {
             const problem = validateItem(item);
             if (problem) {
                 setStatus(`Slot ${i + 1}: ${problem}`);
-                saveBtn.disabled = false;
-                return;
+                return false;
             }
         }
         const fallbackRevision = editRevision;
@@ -960,18 +982,25 @@ function makeMenuPanel(deps) {
             await pageRequest('upsert-files', {
                 files: [{ path: state.menuConfigPath, contents: generateMenuConfig(state.items) }],
             });
-            if (editRevision !== fallbackRevision) {
-                setStatus('Saved — but the menu changed while saving. Save again to keep those changes.');
-                saveBtn.disabled = false;
-                return;
-            }
+            if (changedSince(fallbackRevision)) return false;
             await persist(true);
+            if (changedSince(fallbackRevision)) return false;
             setStatus('Saved ✓ — reloading…');
-            setTimeout(() => reload(), 800);
+            // The pause lets the status be read; an edit made during it
+            // cancels the reload rather than being thrown away by it.
+            setTimeout(() => {
+                if (editRevision === fallbackRevision) {
+                    reload();
+                    return;
+                }
+                saving = false; // reload cancelled: the newer edits need a Save
+                changedSince(fallbackRevision);
+            }, 800);
+            return true;
         } catch (err) {
             console.error('[pybricks-git] menu save failed:', err);
             setStatus(`Save failed: ${err.message}`);
-            saveBtn.disabled = false;
+            return false;
         }
     }
 
