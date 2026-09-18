@@ -72,3 +72,57 @@ function planPull({ local, repo, base = {}, protectedPaths = [] }) {
     }
     return { files, rescued };
 }
+
+// --- Open-tab cleanup ---------------------------------------------------------
+//
+// Pybricks remembers open editor tabs in sessionStorage, as a JSON array of
+// file uuids under `editor.activeFileHistory.<window.name>.<editorId>`
+// (pybricks-code src/editor/lib.ts ActiveFileHistoryManager), and reopens each
+// on load. A uuid whose file a Pull deleted fails that reopen with an
+// "unexpected error" toast ("file with uuid '…' not found"). These helpers
+// find the uuids a Pull removes and prune them from that history.
+
+const OPEN_TAB_HISTORY_PREFIX = 'editor.activeFileHistory.';
+
+// uuids of the editor's files that are absent from `keptPaths` — exactly what
+// apply-files deletes when handed a file set with those paths.
+//   metadata   [{path, uuid}]   the editor's metadata rows before the apply
+//   keptPaths  [path]           the paths passed to apply-files
+function deletedUuids(metadata, keptPaths) {
+    const kept = new Set(keptPaths);
+    return metadata.filter((m) => !kept.has(m.path)).map((m) => m.uuid);
+}
+
+// One history value with `uuids` removed. Returns the new JSON string, or null
+// when nothing changes (including a value that isn't a JSON array — Pybricks
+// itself treats that as empty, so it's left alone).
+function pruneTabHistory(value, uuids) {
+    let history;
+    try {
+        history = JSON.parse(value);
+    } catch {
+        return null;
+    }
+    if (!Array.isArray(history)) return null;
+    const drop = new Set(uuids);
+    const pruned = history.filter((u) => !drop.has(u));
+    return pruned.length === history.length ? null : JSON.stringify(pruned);
+}
+
+// Applies pruneTabHistory to every open-tab history key in `storage` (a Web
+// Storage object — sessionStorage in the page). Returns the number of keys
+// rewritten.
+function pruneOpenTabs(storage, uuids) {
+    if (!uuids.length) return 0;
+    let rewritten = 0;
+    for (let i = 0; i < storage.length; i++) {
+        const key = storage.key(i);
+        if (!key || !key.startsWith(OPEN_TAB_HISTORY_PREFIX)) continue;
+        const next = pruneTabHistory(storage.getItem(key), uuids);
+        if (next !== null) {
+            storage.setItem(key, next);
+            rewritten++;
+        }
+    }
+    return rewritten;
+}

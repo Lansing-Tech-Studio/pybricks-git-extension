@@ -652,6 +652,46 @@ async function main() {
         );
         log('pushed competing change to the bare repo');
 
+        // Open gone.py (deleted upstream below) and keep.py (kept) in editor
+        // tabs, the way the Explorer does. Pybricks remembers open tabs in
+        // sessionStorage and reopens them after the reload; a stale uuid for
+        // gone.py would raise its "unexpected error … not found" toast. That
+        // toast auto-dismisses after 5s, so record every toast from load on.
+        const evalMain = async (expression) => {
+            const r = await page.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+            if (r.exceptionDetails) {
+                throw new Error('main eval threw: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text));
+            }
+            return r.result.value;
+        };
+        await page.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+            window.__toasts = [];
+            new MutationObserver(() => {
+                for (const t of document.querySelectorAll('.bp5-toast')) {
+                    if (!window.__toasts.includes(t.textContent)) window.__toasts.push(t.textContent);
+                }
+            }).observe(document, { childList: true, subtree: true, characterData: true });
+        ` });
+        const tabMeta = (await evalIsolated(`pageRequest('list-files')`)).metadata;
+        const goneUuid = tabMeta.find((m) => m.path === 'gone.py').uuid;
+        const keepUuid = tabMeta.find((m) => m.path === 'keep.py').uuid;
+        for (const uuid of [keepUuid, goneUuid]) {
+            await evalMain(`findAppStore().dispatch({ type: 'editor.action.activateFile', uuid: ${JSON.stringify(uuid)} })`);
+            await poll(
+                () => evalMain(`findAppStore().getState().editor.openFileUuids.includes(${JSON.stringify(uuid)})`),
+                { timeout: 15000, what: 'a file to open in an editor tab' },
+            );
+        }
+        const tabHistory = () =>
+            evalMain(
+                `Object.keys(sessionStorage).filter((k) => k.startsWith('editor.activeFileHistory.')).flatMap((k) => JSON.parse(sessionStorage.getItem(k)))`,
+            );
+        const historyBefore = await tabHistory();
+        assert(
+            historyBefore.includes(goneUuid) && historyBefore.includes(keepUuid),
+            'gone.py and keep.py are open editor tabs before the Pull',
+        );
+
         await trustedClick(await buttonRect('Pull'));
         const mergeLabel = await poll(
             async () => {
@@ -703,6 +743,25 @@ async function main() {
             timeout: 40000,
             what: 'buttons to remount after the merge reload',
         });
+        // Pybricks reopens remembered tabs as the editor mounts; give it time
+        // to try (and to toast, if a stale uuid were still there).
+        await poll(() => evalMain(`findAppStore()?.getState().editor.openFileUuids.length > 0`), {
+            timeout: 20000,
+            what: 'Pybricks to reopen the remembered tabs',
+        });
+        await sleep(2000);
+        // The toast is the decisive check: once Pybricks reopens keep.py it
+        // rewrites the history from memory, which drops a stale gone.py uuid
+        // anyway — but only AFTER the failed reopen has already toasted.
+        // (Verified: with the prune disabled, only this assertion fails.)
+        const staleToasts = (await evalMain(`window.__toasts`)).filter((t) => /not found/.test(t));
+        assert(
+            staleToasts.length === 0,
+            `no "file … not found" toast after the reload (${JSON.stringify(staleToasts)})`,
+        );
+        const historyAfter = await tabHistory();
+        assert(!historyAfter.includes(goneUuid), "the deleted gone.py left Pybricks' open-tab history");
+        assert(historyAfter.includes(keepUuid), 'the kept keep.py is still a remembered tab');
         const afterMerge = await evalIsolated(`pageRequest('list-files')`);
         const mergedPaths = afterMerge.contents.map((c) => c.path);
         const mergedBy = new Map(afterMerge.contents.map((c) => [c.path, c.contents]));

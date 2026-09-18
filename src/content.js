@@ -478,6 +478,9 @@ async function pull(btn) {
             console.warn('[pybricks-git] rescued local edits:', plan.rescued);
         }
 
+        // The files apply-files is about to delete — their uuids must also
+        // leave Pybricks' open-tab history, or the reload tries to reopen them.
+        const goneUuids = deletedUuids(editor.metadata, plan.files.map((f) => f.path));
         const summary = await pageRequest('apply-files', { files: plan.files });
         console.log('[pybricks-git] applied:', summary);
         btn.textContent = `↓ +${summary.added} ~${summary.changed} -${summary.deleted}`;
@@ -492,7 +495,19 @@ async function pull(btn) {
         // dexie-observable doesn't see raw IDB writes, so reload to refresh
         // the React UI. Brief delay so the user can see the summary.
         if (summary.added || summary.changed || summary.deleted) {
-            setTimeout(() => location.reload(), 1500);
+            setTimeout(() => {
+                // Prune right before the reload, not earlier: the page's
+                // in-memory tab history rewrites sessionStorage whenever a tab
+                // opens or closes, so an earlier prune could be undone.
+                try {
+                    pruneOpenTabs(sessionStorage, goneUuids);
+                } catch (err) {
+                    // Storage can be unavailable; the cost is only Pybricks'
+                    // own "file not found" toast after the reload.
+                    console.warn('[pybricks-git] open-tab cleanup failed:', err);
+                }
+                location.reload();
+            }, 1500);
         } else {
             setTimeout(() => (btn.textContent = original), 3000);
         }
