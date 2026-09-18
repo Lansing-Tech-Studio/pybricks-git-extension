@@ -285,7 +285,7 @@ describe('analyzeProgram', () => {
 
     test('block main program: isBlocks, run_task disqualifies methods', () => {
         const r = api.analyzeProgram('my_program.py', BLOCKS_MAIN);
-        assert.deepEqual(r, { module: 'my_program', isBlocks: true, setupOnly: false, methods: [] });
+        assert.deepEqual(r, { module: 'my_program', isBlocks: true, setupOnly: false, methods: [], wholeProgram: true });
     });
     test('block setup-only file: methods listed, async included', () => {
         const r = api.analyzeProgram('arm_moves.py', BLOCKS_SETUP);
@@ -295,7 +295,7 @@ describe('analyzeProgram', () => {
     });
     test('plain mission module: setup-only with run()', () => {
         const r = api.analyzeProgram('mission_01.py', PLAIN_MISSION);
-        assert.deepEqual(r, { module: 'mission_01', isBlocks: false, setupOnly: true, methods: ['run'] });
+        assert.deepEqual(r, { module: 'mission_01', isBlocks: false, setupOnly: true, methods: ['run'], wholeProgram: true });
     });
     test('top-level call disqualifies (trailing main statement)', () => {
         const src = 'def go():\n    pass\n\ngo()\n';
@@ -323,6 +323,28 @@ describe('analyzeProgram', () => {
         assert.equal(api.analyzeProgram('dir/x.py', 'x = 1\n').module, null);
         assert.equal(api.analyzeProgram('1bad.py', 'x = 1\n').module, null);
         assert.equal(api.analyzeProgram('notpy.txt', 'x = 1\n').module, null);
+    });
+    test('__main__ guard is setup, and hides whole-program mode', () => {
+        const src = 'from robot import Robot\n\ndef run(robot):\n    pass\n\n' +
+            'if __name__ == "__main__":\n    run(Robot())\n';
+        assert.deepEqual(api.analyzeProgram('dance.py', src), {
+            module: 'dance', isBlocks: false, setupOnly: true, methods: ['run'], wholeProgram: false,
+        });
+        const single = "def go():\n    pass\nif __name__=='__main__':\n    go()\n";
+        assert.equal(api.analyzeProgram('x.py', single).wholeProgram, false);
+    });
+    test('__main__ guard next to other top-level code keeps whole-program mode', () => {
+        const src = 'def go():\n    pass\ngo()\nif __name__ == "__main__":\n    go()\n';
+        const r = api.analyzeProgram('x.py', src);
+        assert.equal(r.setupOnly, false);
+        assert.equal(r.wholeProgram, true);
+    });
+    test('other if statements are not mistaken for a __main__ guard', () => {
+        assert.equal(api.analyzeProgram('x.py', 'if __name__ != "__main__":\n    pass\n').setupOnly, false);
+        assert.equal(api.analyzeProgram('x.py', 'if __name__ == "other":\n    pass\n').setupOnly, false);
+    });
+    test('setup-only file without a __main__ guard keeps whole-program mode', () => {
+        assert.equal(api.analyzeProgram('x.py', 'def go():\n    pass\n').wholeProgram, true);
     });
     test('multiline constructs do not register as new statements', () => {
         const src = 'ITEMS = [\n    1,\n    2,\n]\nLONG = (\n    "a"\n    "b"\n)\ns = """text\nrun_task( inside a string\n"""\n';

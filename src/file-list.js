@@ -145,11 +145,13 @@ function makeFileListWatcher(deps) {
         // protected row.
         const entries = [];
         if (info.module && !isProtected) {
-            entries.push({
-                item: info.module,
-                label: `Add ${info.module} to menu`,
-                run: () => void addSlot(info.module, null, false),
-            });
+            if (info.wholeProgram) {
+                entries.push({
+                    item: info.module,
+                    label: `Add ${info.module} to menu`,
+                    run: () => void addSlot(info.module, null, false),
+                });
+            }
             for (const method of info.methods) {
                 entries.push({
                     item: `${info.module}.${method}`,

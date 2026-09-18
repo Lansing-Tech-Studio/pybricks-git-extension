@@ -724,11 +724,15 @@ function makeMenuPanel(deps) {
             row.appendChild(warn);
         }
 
-        const addWhole = miniIconButton('+ program', `Run all of ${p.module}`, () =>
-            void addSlot(p.module, null, false),
-        );
-        addWhole.dataset.pybricksGitAdd = p.module;
-        row.appendChild(addWhole);
+        // Skipped when running the whole file would do nothing (its only
+        // runnable code is under `if __name__ == "__main__":`).
+        if (p.wholeProgram) {
+            const addWhole = miniIconButton('+ program', `Run all of ${p.module}`, () =>
+                void addSlot(p.module, null, false),
+            );
+            addWhole.dataset.pybricksGitAdd = p.module;
+            row.appendChild(addWhole);
+        }
 
         for (const fn of p.methods) {
             const addFn = miniIconButton(`+ ${fn}()`, `Run just ${fn}() from ${p.module}`, () =>

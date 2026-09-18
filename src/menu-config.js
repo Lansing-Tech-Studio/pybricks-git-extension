@@ -296,11 +296,15 @@ function validateItem(item) {
 //   assignments / docstrings at top level, and no run_task( anywhere top-level)
 // - methods: top-level def/async def names (empty unless setupOnly);
 //   underscore-prefixed names are treated as private and hidden.
+// - wholeProgram: offer "run the whole file". False when the file's only
+//   runnable code sits under `if __name__ == "__main__":` — the menu imports
+//   the file, so __name__ is the module name and that block never runs.
 function analyzeProgram(path, contents) {
     const m = /^([A-Za-z_][A-Za-z0-9_]*)\.py$/.exec(path);
     const module = m ? m[1] : null;
     const isBlocks = contents.startsWith(BLOCKS_SENTINEL);
     let setupOnly = true;
+    let hasMainGuard = false;
     const methods = [];
     for (const stmt of topLevelStatements(contents)) {
         const def = /^(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(stmt);
@@ -308,9 +312,25 @@ function analyzeProgram(path, contents) {
             if (!def[1].startsWith('_')) methods.push(def[1]);
             continue;
         }
+        if (isMainGuard(stmt)) {
+            hasMainGuard = true;
+            continue;
+        }
         if (/\brun_task\s*\(/.test(stmt) || !isSetupStatement(stmt)) setupOnly = false;
     }
-    return { module, isBlocks, setupOnly, methods: setupOnly ? methods : [] };
+    return {
+        module,
+        isBlocks,
+        setupOnly,
+        methods: setupOnly ? methods : [],
+        wholeProgram: !(setupOnly && hasMainGuard),
+    };
+}
+
+// `if __name__ == "__main__":` — its body only runs when the file is run
+// directly, never when the menu imports it, so it doesn't count as running code.
+function isMainGuard(stmt) {
+    return /^if\s+__name__\s*==\s*(["'])__main__\1\s*:/.test(stmt);
 }
 
 // Returns the first physical line (comments stripped, trimmed) of every
