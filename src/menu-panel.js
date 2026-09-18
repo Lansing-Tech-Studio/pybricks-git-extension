@@ -890,10 +890,14 @@ function makeMenuPanel(deps) {
 
     // --- save ------------------------------------------------------------
 
-    // Save = regenerate the whole file and upsert ONLY that path. Always
-    // reload afterwards: dexie-observable can't see raw IDB writes, and if
-    // menu_config.py is open in Monaco a stale buffer would clobber this save
-    // on the app's next write. The persisted open flag reopens the panel.
+    // Save = regenerate the whole file and write ONLY that path. First choice
+    // is write-files-live: Pybricks' own store does the write (updating an open
+    // menu_config.py tab in place), so there's no page reload — a reload drops
+    // the hub's Bluetooth connection. If the app can't be driven (store not
+    // found, write not confirmed), fall back to the raw upsert + reload: with
+    // a raw write dexie-observable sees nothing, and an open menu_config.py tab
+    // would clobber the save on its next write. The persisted open flag
+    // reopens the panel after that reload.
     async function saveConfig(saveBtn) {
         for (const [i, item] of state.items.entries()) {
             const problem = validateItem(item);
@@ -904,11 +908,30 @@ function makeMenuPanel(deps) {
         }
         saveBtn.disabled = true;
         setStatus('Saving…');
+        const files = [{ path: state.menuConfigPath, contents: generateMenuConfig(state.items) }];
+        let live;
         try {
-            const text = generateMenuConfig(state.items);
-            await pageRequest('upsert-files', {
-                files: [{ path: state.menuConfigPath, contents: text }],
-            });
+            live = await pageRequest('write-files-live', { files });
+        } catch (err) {
+            live = { live: false, reason: err.message };
+        }
+        if (live.live) {
+            try {
+                state = await loadState();
+            } catch (err) {
+                // The file is saved; only the panel refresh failed. Keep the
+                // edited slots but mark them clean.
+                console.warn('[pybricks-git] menu panel refresh after save failed:', err);
+                state.dirty = false;
+                state.banner = '';
+            }
+            render();
+            setStatus('Saved ✓');
+            return;
+        }
+        console.warn('[pybricks-git] live menu save unavailable, reloading instead:', live.reason);
+        try {
+            await pageRequest('upsert-files', { files });
             await persist(true);
             setStatus('Saved ✓ — reloading…');
             setTimeout(() => reload(), 800);

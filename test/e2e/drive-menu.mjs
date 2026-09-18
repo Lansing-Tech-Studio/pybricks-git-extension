@@ -3,7 +3,8 @@
 // Self-contained sibling of drive.mjs: starts the in-repo git HTTP harness
 // (Task 2), launches Playwright's Chromium with the unpacked extension, and
 // drives the real Pull → open Menu panel → add a program slot → Save (rewrites
-// menu_config.py via upsert-files) → Commit flow on https://code.pybricks.com
+// menu_config.py via write-files-live, no reload — also with the file open in
+// an editor tab) → Commit flow on https://code.pybricks.com
 // over raw CDP (Node 22's built-in WebSocket, no npm deps). Asserts on the
 // browser side (panel DOM, slot counts, add buttons), the editor IndexedDB
 // (regenerated menu_config.py), the SW storage (lastPullManifest), and the
@@ -568,8 +569,12 @@ async function main() {
             'no add button for protected menu.py (excluded from programs)',
         );
 
-        // -- Add a slot, then Save ------------------------------------------
-        step(6, 'Add arm_moves.lift_arm; Save (rewrites menu_config.py) + reload');
+        // -- Add a slot, then Save (no reload) ------------------------------
+        // Save writes through Pybricks' own store (write-files-live), so the
+        // page must NOT reload — a reload drops the hub's Bluetooth link. A
+        // marker on the isolated world's window proves the same document
+        // survived; a reload would wipe it along with the context.
+        step(6, 'Add arm_moves.lift_arm; Save (rewrites menu_config.py) with no reload');
         await clickSelector(
             '[data-pybricks-git-add="arm_moves.lift_arm"]',
             'arm_moves.lift_arm add button',
@@ -580,24 +585,30 @@ async function main() {
         );
         assert(slotCount1 === 2, 'adding arm_moves.lift_arm grows slots to 2');
 
+        await evalIsolated(`window.__pbgitNoReload = 1`, false);
+        const ctxBeforeSave = isolatedCtx;
         await clickSelector('[data-pybricks-git-save]', 'Save button');
-        log('Save clicked; waiting for reload...');
-        await poll(() => isolatedCtx === null, {
-            timeout: 15000,
-            what: 'reload to clear isolated context after Save',
-        }).catch(() => log('note: did not observe context clear (may have raced)'));
-        await poll(async () => (await buttonRect('Pull')) != null, {
-            timeout: 40000,
-            what: 'buttons to remount after Save reload',
-        });
-        // The persisted open flag reopens the panel on load, unattended.
-        await poll(() => exists('[data-pybricks-git-panel]'), {
-            timeout: 15000,
-            what: 'menu panel to auto-reopen after reload',
-        });
+        const saveStatus = await poll(
+            () =>
+                evalIsolated(
+                    `(() => { const s = document.querySelector('[data-pybricks-git-status]'); return s && /^Saved|failed/.test(s.textContent) ? s.textContent : null; })()`,
+                    false,
+                ),
+            { timeout: 15000, interval: 100, what: 'Save status' },
+        );
+        log('save status =', JSON.stringify(saveStatus));
+        assert(saveStatus === 'Saved ✓', `Save finished without a reload (status "${saveStatus}")`);
+        await sleep(1500); // a fallback reload fires 800ms after the status
         assert(
-            await exists('[data-pybricks-git-panel]'),
-            'panel auto-reopened after Save reload (persisted open flag)',
+            isolatedCtx === ctxBeforeSave && (await evalIsolated(`window.__pbgitNoReload === 1`, false)),
+            'the page did not reload after Save',
+        );
+        assert(
+            await evalIsolated(
+                `document.querySelector('[data-pybricks-git-save]').textContent === 'Saved'`,
+                false,
+            ),
+            'Save button reads "Saved" (panel state refreshed from the write)',
         );
 
         // -- Verify the regenerated menu_config.py in the editor IDB --------
@@ -628,6 +639,96 @@ async function main() {
                 parsed.second.function === 'lift_arm' &&
                 parsed.second.blocks === true,
             'second item = {display:2, module:arm_moves, function:lift_arm, blocks:true}',
+        );
+
+        // -- Save while menu_config.py is open in an editor tab --------------
+        // The dangerous case the old reload guarded against: an open Monaco
+        // model holds its own copy of the file and writes it back on the next
+        // keystroke. The live save must update that model in place, so typing
+        // in the tab afterwards keeps BOTH the new slot and the kid's edit.
+        step('7b', 'Save with menu_config.py open in the editor, then type in it');
+        const evalMain = async (expression) => {
+            const r = await page.send('Runtime.evaluate', {
+                expression,
+                awaitPromise: true,
+                returnByValue: true,
+            });
+            if (r.exceptionDetails) {
+                throw new Error('main eval threw: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text));
+            }
+            return r.result.value;
+        };
+        const configUuid = listing.metadata.find((m) => m.path === 'menu_config.py').uuid;
+        // Open the tab the way the Explorer does: editor.action.activateFile on
+        // the app's own store (findAppStore is inject.js's, in the MAIN world).
+        await evalMain(
+            `findAppStore().dispatch({ type: 'editor.action.activateFile', uuid: ${JSON.stringify(configUuid)} })`,
+        );
+        await poll(
+            () =>
+                evalMain(
+                    `findAppStore().getState().editor.openFileUuids.includes(${JSON.stringify(configUuid)}) && !!document.querySelector('.monaco-editor .view-lines')`,
+                ),
+            { timeout: 15000, what: 'menu_config.py to open in an editor tab' },
+        );
+        assert(true, 'menu_config.py is open in an editor tab');
+
+        await clickSelector('[data-pybricks-git-add="mission_01.run"], [data-pybricks-git-add="mission_01"]', 'a mission_01 add button');
+        await poll(
+            async () => ((await count('[data-pybricks-git-slot]')) === 3 ? 3 : null),
+            { timeout: 10000, what: 'slot count to grow to 3' },
+        );
+        await clickSelector('[data-pybricks-git-save]', 'Save button (tab open)');
+        const saveStatus2 = await poll(
+            () =>
+                evalIsolated(
+                    `(() => { const s = document.querySelector('[data-pybricks-git-status]'); return s && /^Saved|failed/.test(s.textContent) ? s.textContent : null; })()`,
+                    false,
+                ),
+            { timeout: 15000, interval: 100, what: 'Save status (tab open)' },
+        );
+        assert(saveStatus2 === 'Saved ✓', `Save with the tab open finished without a reload (status "${saveStatus2}")`);
+        await sleep(1500);
+        assert(isolatedCtx === ctxBeforeSave, 'the page did not reload after the second Save');
+
+        const saved3 = (await evalIsolated(`pageRequest('list-files')`)).contents.find(
+            (c) => c.path === 'menu_config.py',
+        ).contents;
+        const parsed3 = await evalIsolated(
+            `(() => { const p = parseMenuConfig(${JSON.stringify(saved3)}); return { error: p.error, len: p.items && p.items.length }; })()`,
+            false,
+        );
+        assert(parsed3.error === null && parsed3.len === 3, `menu_config.py holds 3 slots after the second Save (${JSON.stringify(parsed3)})`);
+
+        // Type at the end of the open tab; Pybricks persists the model. If the
+        // model were stale this write would drop the third slot.
+        await clickSelector('.monaco-editor .view-lines', 'the Monaco editor');
+        for (const type of ['keyDown', 'keyUp']) {
+            await page.send('Input.dispatchKeyEvent', {
+                type,
+                modifiers: 2, // Ctrl
+                windowsVirtualKeyCode: 35,
+                key: 'End',
+                code: 'End',
+            });
+        }
+        await page.send('Input.insertText', { text: '\n# kid edit\n' });
+        const afterTyping = await poll(
+            async () => {
+                const c = (await evalIsolated(`pageRequest('list-files')`)).contents.find(
+                    (x) => x.path === 'menu_config.py',
+                ).contents;
+                return c.includes('# kid edit') ? c : null;
+            },
+            { timeout: 15000, interval: 250, what: "the kid's edit to be persisted by Pybricks" },
+        );
+        const parsedAfter = await evalIsolated(
+            `(() => { const p = parseMenuConfig(${JSON.stringify(afterTyping)}); return { error: p.error, len: p.items && p.items.length }; })()`,
+            false,
+        );
+        assert(
+            parsedAfter.error === null && parsedAfter.len === 3,
+            `typing in the open tab kept all 3 saved slots (${JSON.stringify(parsedAfter)})`,
         );
 
         // -- Commit ---------------------------------------------------------

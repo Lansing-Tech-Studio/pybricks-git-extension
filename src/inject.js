@@ -31,6 +31,8 @@ async function handle(op, payload) {
             return await applyFiles(payload);
         case 'upsert-files':
             return await upsertFiles(payload);
+        case 'write-files-live':
+            return await writeFilesLive(payload);
         default:
             throw new Error(`unknown op: ${op}`);
     }
@@ -161,6 +163,111 @@ async function writeFiles(files, deleteUnlisted) {
 
         await txDone(tx);
         return { added, changed, deleted, unchanged };
+    } finally {
+        db.close();
+    }
+}
+
+// --- Writing through the app (no reload) --------------------------------
+//
+// Raw IDB writes (above) are invisible to the running app, so callers used to
+// follow them with a page reload — which drops the hub's Bluetooth link.
+// writeFilesLive instead asks Pybricks' own Redux store to do the write, the
+// way its Explorer "Import file" does: a file open in an editor tab gets
+// `editor.action.replaceFile` (the open Monaco model is updated in place, with
+// an undo stop, and the app persists it), any other file gets
+// `fileStorage.action.writeFile` (a Dexie write, so the file list and every
+// dexie-observable subscriber see it). Action shapes are from pybricks-code
+// src/editor/actions.ts + src/fileStorage/actions.ts.
+//
+// Everything here is best effort and self-verifying: it resolves
+// {live: true} only once IndexedDB holds exactly the requested contents, and
+// {live: false, reason} otherwise — store not found, app not initialized, or
+// no confirmation within timeoutMs. On {live: false} the caller falls back
+// to upsert-files + reload, so an upstream UI change degrades to the old
+// behaviour instead of losing a save.
+
+const LIVE_WRITE_TIMEOUT_MS = 5000;
+
+// The app's Redux store, found by walking React's fiber tree from the root
+// container down to the react-redux <Provider store>. Only a store whose
+// state has the shape we rely on counts. Null when anything is missing.
+function findAppStore(rootEl = document.getElementById('root')) {
+    if (!rootEl) return null;
+    const key = Object.keys(rootEl).find((k) => k.startsWith('__reactContainer$'));
+    if (!key) return null;
+    const stack = [rootEl[key]];
+    // The Provider sits near the top of the tree; the cap only bounds a
+    // pathological walk if it ever moves or disappears.
+    for (let visited = 0; stack.length && visited < 5000; visited++) {
+        const fiber = stack.pop();
+        if (!fiber) continue;
+        const props = fiber.memoizedProps;
+        const store = props && typeof props === 'object' ? props.store : null;
+        if (store && typeof store.dispatch === 'function' && typeof store.getState === 'function') {
+            const st = store.getState();
+            if (
+                st && st.editor && Array.isArray(st.editor.openFileUuids) &&
+                st.fileStorage && st.fileStorage.isInitialized === true
+            ) {
+                return store;
+            }
+        }
+        if (fiber.sibling) stack.push(fiber.sibling);
+        if (fiber.child) stack.push(fiber.child);
+    }
+    return null;
+}
+
+// Pure: which action writes each file. Files already holding the requested
+// contents get none (no spurious undo stop in an open tab).
+function planLiveWrites(files, metadata, openFileUuids) {
+    const metaByPath = new Map(metadata.map((m) => [m.path, m]));
+    const open = new Set(openFileUuids);
+    const actions = [];
+    for (const f of files) {
+        const existing = metaByPath.get(f.path);
+        if (existing && existing.sha256 === f.sha) continue;
+        if (existing && open.has(existing.uuid)) {
+            actions.push({ type: 'editor.action.replaceFile', uuid: existing.uuid, value: f.contents });
+        } else {
+            actions.push({ type: 'fileStorage.action.writeFile', path: f.path, contents: f.contents });
+        }
+    }
+    return actions;
+}
+
+async function writeFilesLive({ files, timeoutMs = LIVE_WRITE_TIMEOUT_MS, rootEl } = {}) {
+    const store = findAppStore(rootEl);
+    if (!store) return { live: false, reason: 'Pybricks app store not found' };
+
+    const wanted = await Promise.all(
+        files.map(async (f) => ({ path: f.path, contents: f.contents, sha: await sha256(f.contents) })),
+    );
+    const before = await readStores();
+    const actions = planLiveWrites(wanted, before.metadata, store.getState().editor.openFileUuids);
+    for (const action of actions) store.dispatch(action);
+
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        const now = await readStores();
+        const byPath = new Map(now.contents.map((c) => [c.path, c.contents]));
+        const shaByPath = new Map(now.metadata.map((m) => [m.path, m.sha256]));
+        const done = wanted.every(
+            (f) => byPath.get(f.path) === f.contents && shaByPath.get(f.path) === f.sha,
+        );
+        if (done) return { live: true, dispatched: actions.length };
+        if (Date.now() >= deadline) {
+            return { live: false, reason: 'Pybricks did not confirm the write in time' };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+}
+
+async function readStores() {
+    const db = await openPybricksDb();
+    try {
+        return { metadata: await readAll(db, 'metadata'), contents: await readAll(db, '_contents') };
     } finally {
         db.close();
     }

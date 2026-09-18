@@ -21,7 +21,7 @@ export function loadInject() {
     }
     const src =
         readFileSync(injectPath, 'utf8') +
-        '\n;globalThis.__pybricksGitTest = { applyFiles, upsertFiles, sha256, listFiles, openPybricksDb };';
+        '\n;globalThis.__pybricksGitTest = { applyFiles, upsertFiles, sha256, listFiles, openPybricksDb, findAppStore, planLiveWrites, writeFilesLive };';
     // eslint-disable-next-line no-new-func
     new Function(src)();
     return globalThis.__pybricksGitTest;

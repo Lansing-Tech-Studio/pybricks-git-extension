@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { IDBFactory } from 'fake-indexeddb';
 import { loadInject } from './load-inject.mjs';
 
-const { applyFiles, upsertFiles, sha256 } = loadInject();
+const { applyFiles, upsertFiles, sha256, findAppStore, planLiveWrites, writeFilesLive } = loadInject();
 
 // Reference SHA-256 hex, computed independently of the code under test.
 const hexSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -313,4 +313,156 @@ test('discovers the Pybricks DB by its store names, not its name', async () => {
     // applyFiles must find the real DB (with both stores) and write into it.
     const summary = await applyFiles({ files: [{ path: 'a.py', contents: 'a\n' }] });
     assert.equal(summary.added, 1);
+});
+
+// --- writeFilesLive: writing through the app's Redux store ---
+
+// A fake React root: #root carries a __reactContainer$ fiber whose subtree
+// holds the react-redux Provider (memoizedProps.store) a few levels down,
+// behind a sibling, with a text fiber (string props) on the way.
+function fakeRoot(store) {
+    const provider = { memoizedProps: { store, children: {} }, child: null, sibling: null };
+    const textNode = { memoizedProps: 'hello', child: null, sibling: provider };
+    const app = { memoizedProps: {}, child: textNode, sibling: null };
+    return { '__reactContainer$abc123': { memoizedProps: null, child: app, sibling: null } };
+}
+
+// A fake store that behaves like Pybricks' sagas: replaceFile/writeFile end
+// in a Dexie write, done here with upsertFiles (after a tick, as a saga would).
+function fakeStore({ openFileUuids = [], initialized = true, onDispatch } = {}) {
+    const dispatched = [];
+    return {
+        dispatched,
+        getState: () => ({ editor: { openFileUuids }, fileStorage: { isInitialized: initialized } }),
+        dispatch(action) {
+            dispatched.push(action);
+            if (onDispatch) onDispatch(action);
+        },
+    };
+}
+
+async function actLikePybricks(action, db) {
+    await new Promise((r) => setTimeout(r, 20));
+    if (action.type === 'fileStorage.action.writeFile') {
+        await upsertFiles({ files: [{ path: action.path, contents: action.contents }] });
+    } else if (action.type === 'editor.action.replaceFile') {
+        const meta = await getAll(db, 'metadata');
+        const row = meta.find((m) => m.uuid === action.uuid);
+        await upsertFiles({ files: [{ path: row.path, contents: action.value }] });
+    }
+}
+
+describe('findAppStore', () => {
+    test('finds the Provider store in the fiber tree', () => {
+        const store = fakeStore();
+        assert.equal(findAppStore(fakeRoot(store)), store);
+    });
+
+    test('returns null without a React container, or with an unexpected state shape', () => {
+        assert.equal(findAppStore(null), null);
+        assert.equal(findAppStore({}), null);
+        const odd = { getState: () => ({ other: 1 }), dispatch() {} };
+        assert.equal(findAppStore(fakeRoot(odd)), null);
+    });
+
+    test('ignores the store until file storage is initialized', () => {
+        assert.equal(findAppStore(fakeRoot(fakeStore({ initialized: false }))), null);
+    });
+});
+
+describe('planLiveWrites', () => {
+    const meta = [
+        { path: 'menu_config.py', uuid: 'u-menu', sha256: 'old' },
+        { path: 'open.py', uuid: 'u-open', sha256: 'old' },
+        { path: 'same.py', uuid: 'u-same', sha256: 'same' },
+    ];
+
+    test('open files go through the editor, others through file storage, unchanged ones not at all', () => {
+        const actions = planLiveWrites(
+            [
+                { path: 'menu_config.py', contents: 'M', sha: 'new' },
+                { path: 'open.py', contents: 'O', sha: 'new' },
+                { path: 'same.py', contents: 'S', sha: 'same' },
+                { path: 'fresh.py', contents: 'F', sha: 'new' },
+            ],
+            meta,
+            ['u-open', 'u-same'],
+        );
+        assert.deepEqual(actions, [
+            { type: 'fileStorage.action.writeFile', path: 'menu_config.py', contents: 'M' },
+            { type: 'editor.action.replaceFile', uuid: 'u-open', value: 'O' },
+            { type: 'fileStorage.action.writeFile', path: 'fresh.py', contents: 'F' },
+        ]);
+    });
+});
+
+describe('writeFilesLive', () => {
+    test('writes a closed file through fileStorage and confirms it in IndexedDB', async () => {
+        const db = await openPybricks();
+        await seed(db, [{ path: 'menu_config.py', contents: 'old\n', uuid: 'u-menu', viewState: { top: 3 } }]);
+        const store = fakeStore({ onDispatch: (a) => actLikePybricks(a, db) });
+        const res = await writeFilesLive({
+            files: [{ path: 'menu_config.py', contents: 'new\n' }],
+            rootEl: fakeRoot(store),
+        });
+        assert.deepEqual(res, { live: true, dispatched: 1 });
+        assert.equal(store.dispatched[0].type, 'fileStorage.action.writeFile');
+        const snap = await snapshot(db);
+        assert.equal(snap.byPath['menu_config.py'], 'new\n');
+        assert.deepEqual(snap.metaByPath['menu_config.py'].viewState, { top: 3 });
+    });
+
+    test('replaces an open file through the editor', async () => {
+        const db = await openPybricks();
+        await seed(db, [{ path: 'menu_config.py', contents: 'old\n', uuid: 'u-menu' }]);
+        const store = fakeStore({ openFileUuids: ['u-menu'], onDispatch: (a) => actLikePybricks(a, db) });
+        const res = await writeFilesLive({
+            files: [{ path: 'menu_config.py', contents: 'new\n' }],
+            rootEl: fakeRoot(store),
+        });
+        assert.equal(res.live, true);
+        assert.deepEqual(store.dispatched, [{ type: 'editor.action.replaceFile', uuid: 'u-menu', value: 'new\n' }]);
+    });
+
+    test('creates a missing file through fileStorage', async () => {
+        const db = await openPybricks();
+        const store = fakeStore({ onDispatch: (a) => actLikePybricks(a, db) });
+        const res = await writeFilesLive({
+            files: [{ path: 'menu_config.py', contents: 'new\n' }],
+            rootEl: fakeRoot(store),
+        });
+        assert.equal(res.live, true);
+        assert.equal((await snapshot(db)).byPath['menu_config.py'], 'new\n');
+    });
+
+    test('an unchanged file dispatches nothing and still confirms', async () => {
+        const db = await openPybricks();
+        await seed(db, [{ path: 'menu_config.py', contents: 'same\n', uuid: 'u-menu' }]);
+        const store = fakeStore({ openFileUuids: ['u-menu'] });
+        const res = await writeFilesLive({
+            files: [{ path: 'menu_config.py', contents: 'same\n' }],
+            rootEl: fakeRoot(store),
+        });
+        assert.deepEqual(res, { live: true, dispatched: 0 });
+        assert.deepEqual(store.dispatched, []);
+    });
+
+    test('reports live:false when the app never writes (so the caller can fall back)', async () => {
+        const db = await openPybricks();
+        await seed(db, [{ path: 'menu_config.py', contents: 'old\n', uuid: 'u-menu' }]);
+        const store = fakeStore(); // swallows the action, as a renamed action type would
+        const res = await writeFilesLive({
+            files: [{ path: 'menu_config.py', contents: 'new\n' }],
+            rootEl: fakeRoot(store),
+            timeoutMs: 300,
+        });
+        assert.equal(res.live, false);
+        assert.match(res.reason, /did not confirm/);
+        assert.equal((await snapshot(db)).byPath['menu_config.py'], 'old\n', 'nothing written behind the app');
+    });
+
+    test('reports live:false without touching IndexedDB when no store is found', async () => {
+        const res = await writeFilesLive({ files: [{ path: 'a.py', contents: 'a' }], rootEl: {} });
+        assert.deepEqual(res, { live: false, reason: 'Pybricks app store not found' });
+    });
 });

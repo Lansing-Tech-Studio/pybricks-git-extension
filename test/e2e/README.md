@@ -213,12 +213,19 @@ plain `mission_01.py`, and a setup-only **blocks** file `arm_moves.py` — then:
    offers `[data-pybricks-git-add="arm_moves.lift_arm"]` while **excluding** the
    protected `menu.py` from the programs list.
 4. Clicks that add button → slot count grows to **2** → clicks
-   `[data-pybricks-git-save]`, which rewrites `menu_config.py` via `upsert-files`
-   and reloads; asserts the panel **auto-reopens** from the persisted `open` flag.
+   `[data-pybricks-git-save]`, which rewrites `menu_config.py` through the app's
+   own store (`write-files-live`); asserts the status reads `Saved ✓` and the page
+   did **not** reload (same isolated context, a window marker survives).
 5. Reads `list-files` from the isolated world and asserts the regenerated
    `menu_config.py` parses to 2 items with the second being
    `{display:2, module:"arm_moves", function:"lift_arm", blocks:true}` — and that
    the raw text contains `"module": "arm_moves", "function": "lift_arm", "blocks": True`.
+5b. Opens `menu_config.py` in an editor tab (dispatching `editor.action.activateFile`
+   on the app's store from the MAIN world), adds a third slot and Saves again —
+   still no reload — then types `# kid edit` at the end of the open tab and
+   waits for Pybricks to persist it. The persisted file must still hold all
+   **3** slots: a stale Monaco model would write back the 2-slot copy. (Verified
+   by breaking the open-tab branch of `planLiveWrites`: this assertion fails.)
 6. **Commit**s (trusted-typed message, Enter) → asserts the label reaches
    `✓ <sha> ↑`, then harness-side: the pushed `menu_config.py` carries the
    `arm_moves` line and `menu.py` is **byte-identical to the seed** (protection
@@ -241,10 +248,17 @@ Recorded from a real passing run (Chromium 1228):
 [e2e-menu] PASS: programs list offers add button for arm_moves.lift_arm
 [e2e-menu] PASS: no add button for protected menu.py (excluded from programs)
 [e2e-menu] PASS: adding arm_moves.lift_arm grows slots to 2
-[e2e-menu] PASS: panel auto-reopened after Save reload (persisted open flag)
+[e2e-menu] PASS: Save finished without a reload (status "Saved ✓")
+[e2e-menu] PASS: the page did not reload after Save
+[e2e-menu] PASS: Save button reads "Saved" (panel state refreshed from the write)
 [e2e-menu] PASS: menu_config.py contains the arm_moves slot line ("module": "arm_moves", "function": "lift_arm", "blocks": True)
 [e2e-menu] PASS: menu_config.py parses to exactly 2 items
 [e2e-menu] PASS: second item = {display:2, module:arm_moves, function:lift_arm, blocks:true}
+[e2e-menu] PASS: menu_config.py is open in an editor tab
+[e2e-menu] PASS: Save with the tab open finished without a reload (status "Saved ✓")
+[e2e-menu] PASS: the page did not reload after the second Save
+[e2e-menu] PASS: menu_config.py holds 3 slots after the second Save ({"error":null,"len":3})
+[e2e-menu] PASS: typing in the open tab kept all 3 saved slots ({"error":null,"len":3})
 [e2e-menu] PASS: commit label shows "✓ <sha> ↑" (got "✓ c95a7d9 ↑")
 [e2e-menu] PASS: pushed menu_config.py contains the arm_moves slot line
 [e2e-menu] PASS: protected menu.py is byte-identical to the seed (protection held end-to-end)
@@ -253,7 +267,8 @@ Recorded from a real passing run (Chromium 1228):
 ```
 
 `menu-panel.png` (committed alongside this README) is the screenshot after the
-push, with the menu panel reopened over the editor.
+push: the panel (still open, never reloaded) over the `menu_config.py` tab,
+which shows all 3 saved slots plus the typed `# kid edit`.
 
 # `drive-splice.mjs` — phase-4 setup-splice round-trip
 
