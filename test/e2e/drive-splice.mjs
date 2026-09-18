@@ -343,7 +343,39 @@ async function main() {
         }
 
         // -- Pull -----------------------------------------------------------
-        step(3, 'Pull the template repo, then wait for the reload');
+        step(3, 'Pull the template repo, with no reload');
+        // Pull, New program and Update robot setup all write through Pybricks'
+        // own store (write-files-live), so the page must never reload — a
+        // reload drops the hub's Bluetooth link. A marker on the isolated
+        // world's window and the context id prove the same document survived.
+        await evalIsolated(`window.__pbgitNoReload = 1`, false);
+        const ctxBefore = isolatedCtx;
+        const noReload = async () =>
+            isolatedCtx === ctxBefore && (await evalIsolated(`window.__pbgitNoReload === 1`, false));
+        const evalMain = async (expression) => {
+            const r = await page.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
+            if (r.exceptionDetails) throw new Error('main eval threw: ' + (r.exceptionDetails.exception?.description || r.exceptionDetails.text));
+            return r.result.value;
+        };
+        // Dismisses Pybricks' "Enable block coding" dialog if it is up (no
+        // licence + a block tab opened). Any OTHER dialog fails the run rather
+        // than being Escaped away unseen.
+        const dismissLicenceDialog = async (after) => {
+            const title = await poll(
+                () => evalMain(`document.querySelector('.bp5-dialog .bp5-heading')?.textContent ?? ''`).then((t) => t || null),
+                { timeout: 3000, interval: 200, what: 'a dialog' },
+            ).catch(() => null);
+            log(`dialog after ${after} =`, JSON.stringify(title));
+            if (!title) return;
+            assert(/^Enable block coding$/.test(title.trim()), `only the expected licence dialog after ${after} (got "${title}")`);
+            // Its Close (×) button, not Escape: focus sits on <body>, where
+            // Blueprint never sees the key. A DOM click, not a trusted one: the
+            // dialog animates in (the button measured 18px, then 30px), and a
+            // coordinate click landed mid-animation did nothing. This dismisses
+            // a third-party dialog; it isn't simulating the kid.
+            await evalMain(`document.querySelector('.bp5-dialog .bp5-dialog-close-button').click()`);
+            await poll(() => evalMain(`!document.querySelector('.bp5-dialog')`), { timeout: 5000, what: 'the licence dialog to close' });
+        };
         await trustedClick(await buttonRect('Pull'));
         const pullLabel = await poll(
             async () => {
@@ -355,8 +387,8 @@ async function main() {
         log('pull label =', JSON.stringify(pullLabel));
         // 6 .py: menu, menu_config, robot_setup, prog_match, prog_differs, prog_renamed.
         assert(pullLabel === '↓ +6 ~0 -0', `Pull label is "↓ +6 ~0 -0" (got "${pullLabel}")`);
-        await poll(() => isolatedCtx === null, { timeout: 15000, what: 'reload to clear isolated context' }).catch(() => {});
-        await poll(async () => (await buttonRect('Pull')) != null, { timeout: 40000, what: 'buttons to remount after reload' });
+        await sleep(2500); // the raw fallback reloads 1.5s after the label
+        assert(await noReload(), 'the page did not reload after Pull');
 
         // -- Manifest -------------------------------------------------------
         step(4, 'Assert lastPullManifest persisted teamSetup');
@@ -379,14 +411,24 @@ async function main() {
         // -- New program from the team setup --------------------------------
         // Creating a local file also DIVERGES the editor from the remote, so the
         // safety snapshot committed by Update (next step) lands a real commit.
-        step(6, 'Create my_new_one via New program; assert seed after reload');
+        step(6, 'Create my_new_one via New program; assert seed, no reload');
         await clickSelector('[data-pybricks-git-new-program]', 'New program button');
         await poll(() => exists('[data-pybricks-git-new-name]'), { timeout: 10000, what: 'name input row' });
         await clickSelector('[data-pybricks-git-new-name]', 'name input');
         await page.send('Input.insertText', { text: 'my_new_one' });
         await clickSelector('[data-pybricks-git-new-create]', 'Create button');
-        await poll(() => isolatedCtx === null, { timeout: 15000, what: 'reload after create' }).catch(() => {});
-        await poll(async () => (await buttonRect('Pull')) != null, { timeout: 40000, what: 'buttons remount post-create' });
+        const createStatus = await poll(
+            () => evalIsolated(`(() => { const s=document.querySelector('[data-pybricks-git-status]'); return s && /^Created|Couldn/.test(s.textContent) ? s.textContent : null; })()`, false),
+            { timeout: 15000, interval: 100, what: 'New program status' },
+        );
+        log('create status =', JSON.stringify(createStatus));
+        assert(/^Created my_new_one\.py ✓$/.test(createStatus), `New program finished without a reload (status "${createStatus}")`);
+        await sleep(1500); // the raw fallback reloads 800ms after the status
+        assert(await noReload(), 'the page did not reload after New program');
+        assert(
+            (await rowHasMarker('my_new_one')) !== 'NO_ROW',
+            'the open panel lists my_new_one without a reload (refreshed in place)',
+        );
         const robotRow0 = (await evalIsolated(`pageRequest('list-files')`)).contents.find((c) => c.path === 'robot_setup.py');
         const robotSig = await sigOf(robotRow0.contents);
         const listingAfterNew = await evalIsolated(`pageRequest('list-files')`);
@@ -400,10 +442,36 @@ async function main() {
         step(7, 'Record remote state, then Update robot setup');
         const subjectsBefore = bareSubjects(bare);
         assert(!subjectsBefore.includes('Before robot setup update'), 'no snapshot commit exists before Update');
-        await poll(() => exists('[data-pybricks-git-panel]'), { timeout: 15000, what: 'panel reopened after create reload' });
+        // Open the block program the Update will rewrite as the ACTIVE tab: an
+        // open block program must be closed, written, and reopened (never
+        // replaced under a live Blockly workspace). The tab and its active
+        // status must survive.
+        const differsUuid = listingAfterNew.metadata.find((m) => m.path === 'prog_differs.py').uuid;
+        await evalMain(`findAppStore().dispatch({ type: 'editor.action.activateFile', uuid: ${JSON.stringify(differsUuid)} })`);
+        await poll(() => evalMain(`findAppStore().getState().editor.openFileUuids.includes(${JSON.stringify(differsUuid)})`), {
+            timeout: 15000,
+            what: 'prog_differs.py to open in a tab',
+        });
+        // Without a licence Pybricks pops "Enable block coding" over a block
+        // file; dismiss it so it can't block the panel click. Only that dialog:
+        // anything else would be an error, and Escape would hide it.
+        await dismissLicenceDialog('opening prog_differs.py');
         await clickSelector('[data-pybricks-git-update-setup]', 'Update robot setup button');
-        await poll(() => isolatedCtx === null, { timeout: 20000, what: 'reload after Update' }).catch(() => {});
-        await poll(async () => (await buttonRect('Pull')) != null, { timeout: 40000, what: 'buttons remount post-Update' });
+        const updateStatus = await poll(
+            () => evalIsolated(`(() => { const s=document.querySelector('[data-pybricks-git-status]'); return s && /^Updated|Couldn|Saved the snapshot/.test(s.textContent) ? s.textContent : null; })()`, false),
+            { timeout: 30000, interval: 200, what: 'Update robot setup status' },
+        );
+        log('update status =', JSON.stringify(updateStatus));
+        assert(/^Updated 1 program\(s\) ✓$/.test(updateStatus), `Update finished without a reload (status "${updateStatus}")`);
+        await sleep(1500);
+        assert(await noReload(), 'the page did not reload after Update robot setup');
+        const tabsAfterUpdate = await evalMain(`findAppStore().getState().editor`);
+        assert(tabsAfterUpdate.openFileUuids.includes(differsUuid), 'the rewritten block program is an open tab again');
+        assert(tabsAfterUpdate.activeFileUuid === differsUuid, 'the rewritten block program is still the active tab');
+        // Reopening the block tab brings back the licence dialog when there's
+        // no licence — exactly what the old reload did when it restored the
+        // tab. Dismiss it so it can't swallow later clicks.
+        await dismissLicenceDialog('Update robot setup');
 
         // -- Snapshot-first + report ----------------------------------------
         step(8, 'Assert snapshot-first commit + splice report + editor outcomes');
@@ -413,7 +481,16 @@ async function main() {
         // The snapshot's tree holds the PRE-splice prog_differs (port E); the
         // spliced port-F version lives only in editor IDB until the manual
         // Commit below. That ordering IS the snapshot-first proof.
-        assert(bareFile(bare, 'prog_differs.py') === PROG_DIFFERS, 'snapshot commit holds the PRE-splice prog_differs.py');
+        // Semantic, not byte-exact: prog_differs.py was open in a tab, and
+        // opening a block file makes the editor regenerate its Python body
+        // from the blocks (the fixture's JSON-surgery body said Port.F; the
+        // regenerated one says Port.E). The snapshot faithfully holds that
+        // editor state — what matters is that its SETUP is still pre-splice.
+        const snapDiffers = bareFile(bare, 'prog_differs.py');
+        assert(
+            (await sigOf(snapDiffers)) === (await sigOf(PROG_DIFFERS)) && (await sigOf(snapDiffers)) !== robotSig,
+            'snapshot commit holds the PRE-splice prog_differs.py setup',
+        );
         assert(bareFile(bare, 'prog_renamed.py') === PROG_RENAMED, 'snapshot commit holds prog_renamed.py verbatim');
         assert(bareFile(bare, 'menu.py') === SEED_FILES['menu.py'], 'protected menu.py untouched in the snapshot');
         await poll(() => exists('[data-pybricks-git-splice-report]'), { timeout: 15000, what: 'splice report block' });
@@ -438,8 +515,8 @@ async function main() {
         if (!licence) {
             log('SKIP: PYBRICKS_LICENSE unset — the editor will not open block files ungated');
         } else {
-            // The Explorer is a TOGGLE and the app restores it open across the
-            // post-Update reload, so clicking blind can close it.
+            // The Explorer is a TOGGLE (and the app restores it open across a
+            // reload), so clicking blind can close it.
             const treeUp = () => exists('[role="tree"][aria-label="Files"]');
             if (!(await treeUp())) {
                 const explorerPt = await rectOf('#pb-toolbar-explorer-button');

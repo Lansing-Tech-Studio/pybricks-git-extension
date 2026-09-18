@@ -375,14 +375,19 @@ function showErrorPanel(opName, err) {
     document.body.appendChild(box);
 }
 
-// Kid-facing report of what Pull rescued. Rendered on the page load *after*
-// the pull's reload, because that's when the rescued files are actually
-// visible in the file list. Click, Escape, or the timeout dismisses it.
+// Kid-facing report of what Pull rescued. A live Pull renders it at once
+// (renderRescueNotice); a Pull that fell back to a reload persists it under
+// pullRescued and it renders on the next load, when the rescued files are
+// actually visible. Click, Escape, or the timeout dismisses it.
 async function showRescueNotice() {
     const rescued = await storageGet('pullRescued');
     if (!rescued || !rescued.length) return;
     await storageSet({ pullRescued: [] });
+    renderRescueNotice(rescued);
+}
 
+function renderRescueNotice(rescued) {
+    document.querySelector('[data-pybricks-git-rescue]')?.remove();
     const box = document.createElement('div');
     box.dataset.pybricksGitRescue = '1';
     box.setAttribute('role', 'status');
@@ -478,18 +483,58 @@ async function pull(btn) {
             console.warn('[pybricks-git] rescued local edits:', plan.rescued);
         }
 
-        // The files apply-files is about to delete — their uuids must also
-        // leave Pybricks' open-tab history, or the reload tries to reopen them.
-        const goneUuids = deletedUuids(editor.metadata, plan.files.map((f) => f.path));
-        const summary = await pageRequest('apply-files', { files: plan.files });
-        console.log('[pybricks-git] applied:', summary);
+        // First choice: sync through Pybricks' own store (write-files-live with
+        // deleteUnlisted — the same full-sync semantics as apply-files), so the
+        // page never reloads and the hub's Bluetooth link survives. It closes
+        // the tabs of deleted files itself. Any doubt → the raw apply-files +
+        // reload below, exactly as before.
+        let live;
+        try {
+            live = await pageRequest('write-files-live', { files: plan.files, deleteUnlisted: true });
+        } catch (err) {
+            live = { live: false, reason: err.message };
+        }
+        let summary;
+        let goneUuids = [];
+        if (live.live) {
+            summary = live.summary;
+            if (live.tabsNotReopened || live.activeNotRestored) {
+                console.warn('[pybricks-git] Pull could not fully restore the editor tabs:', {
+                    tabsNotReopened: live.tabsNotReopened,
+                    activeNotRestored: live.activeNotRestored,
+                });
+            }
+        } else {
+            console.warn('[pybricks-git] live Pull unavailable, reloading instead:', live.reason);
+            // The files apply-files is about to delete — their uuids must also
+            // leave Pybricks' open-tab history, or the reload tries to reopen them.
+            goneUuids = deletedUuids(editor.metadata, plan.files.map((f) => f.path));
+            summary = await pageRequest('apply-files', { files: plan.files });
+        }
+        console.log('[pybricks-git] applied:', summary, live.live ? '(live)' : '(raw)');
         btn.textContent = `↓ +${summary.added} ~${summary.changed} -${summary.deleted}`;
-        // Both keys are written only after apply-files resolves. The base must
-        // never claim agreement the editor doesn't hold: if the apply throws,
-        // the editor is still on the old files, and an advanced base would let
-        // the next Commit push them over whatever the repo now has. A stale
-        // pullRescued would likewise render a false notice on the next load.
+        // Written only once the editor holds the files (live: confirmed by
+        // read-back; raw: after apply-files resolves). The base must never
+        // claim agreement the editor doesn't hold: if the apply throws, the
+        // editor is still on the old files, and an advanced base would let the
+        // next Commit push them over whatever the repo now has.
         await storageSet({ lastPullShas: result.shas });
+
+        if (live.live) {
+            // Nothing reloads, so everything a reload used to refresh is
+            // refreshed here: the rescue notice shows now, and the panel and
+            // file list pick up the new files and the new manifest.
+            if (plan.rescued.length) renderRescueNotice(plan.rescued);
+            await Promise.all([
+                menuPanel.refresh().catch((err) => console.warn('[pybricks-git] panel refresh failed:', err)),
+                fileListWatcher.refresh().catch((err) => console.warn('[pybricks-git] file-list refresh failed:', err)),
+            ]);
+            setTimeout(() => (btn.textContent = original), 3000);
+            return;
+        }
+
+        // A stale pullRescued would render a false notice on the next load,
+        // so it too waits for apply-files.
         if (plan.rescued.length) await storageSet({ pullRescued: plan.rescued });
 
         // dexie-observable doesn't see raw IDB writes, so reload to refresh

@@ -172,22 +172,38 @@ async function writeFiles(files, deleteUnlisted) {
 //
 // Raw IDB writes (above) are invisible to the running app, so callers used to
 // follow them with a page reload — which drops the hub's Bluetooth link.
-// writeFilesLive instead asks Pybricks' own Redux store to do the write, the
-// way its Explorer "Import file" does: a file open in an editor tab gets
-// `editor.action.replaceFile` (the open Monaco model is updated in place, with
-// an undo stop, and the app persists it), any other file gets
-// `fileStorage.action.writeFile` (a Dexie write, so the file list and every
-// dexie-observable subscriber see it). Action shapes are from pybricks-code
-// src/editor/actions.ts + src/fileStorage/actions.ts.
+// writeFilesLive instead asks Pybricks' own Redux store to do the work, the
+// way its Explorer does (pybricks-code src/explorer/sagas.ts: importPythonFile
+// for writes, handleExplorerDeleteFile for deletes):
+//   - a text file open in an editor tab gets `editor.action.replaceFile` (the
+//     open Monaco model is updated in place, with an undo stop, and the app
+//     persists it);
+//   - any other write gets `fileStorage.action.writeFile` (a Dexie write, so
+//     the file list and every dexie-observable subscriber see it);
+//   - a delete gets `fileStorage.action.deleteFile`, after closing its tab
+//     with `editor.action.closeFile` (the Explorer's order — deleting an open
+//     file fails as "in use", and closing also drops it from the remembered
+//     tabs);
+//   - a BLOCK program open in a tab is closed, written, then reopened. The
+//     block editor keeps its own Blockly workspace, and nothing shows it
+//     reloads when the model is replaced underneath it; a stale workspace
+//     would later write the old program back. Close + reopen leaves it exactly
+//     where a page reload would.
+// Action shapes are from pybricks-code src/editor/actions.ts +
+// src/fileStorage/actions.ts.
 //
 // Everything here is best effort and self-verifying: it resolves
-// {live: true} only once IndexedDB holds exactly the requested contents, and
-// {live: false, reason} otherwise — store not found, app not initialized, or
-// no confirmation within timeoutMs. On {live: false} the caller falls back
-// to upsert-files + reload, so an upstream UI change degrades to the old
-// behaviour instead of losing a save.
+// {live: true, summary} only once IndexedDB holds exactly the requested
+// contents (and none of the deleted paths), and {live: false, reason}
+// otherwise — store not found, app not initialized, anything thrown, or no
+// confirmation in time. It never rejects. On {live: false} the caller falls
+// back to the raw write + reload, so an upstream UI change degrades to the
+// old behaviour instead of losing data.
 
 const LIVE_WRITE_TIMEOUT_MS = 5000;
+const BLOCKS_SENTINEL = '# pybricks blocks file:';
+
+const isBlocksFile = (text) => typeof text === 'string' && text.startsWith(BLOCKS_SENTINEL);
 
 // The app's Redux store, found by walking React's fiber tree from the root
 // container down to the react-redux <Provider store>. Only a store whose
@@ -219,58 +235,165 @@ function findAppStore(rootEl = document.getElementById('root')) {
     return null;
 }
 
-// Pure: which action writes each file. Files already holding the requested
-// contents get none (no spurious undo stop in an open tab).
-function planLiveWrites(files, metadata, openFileUuids) {
-    const metaByPath = new Map(metadata.map((m) => [m.path, m]));
+// Pure: how to bring the editor to `files` through the app.
+//   files          [{path, contents, sha}]   the desired contents
+//   before         {metadata, contents}      the editor's IndexedDB now
+//   openFileUuids  [uuid]                    tabs open in the editor, in order
+//   deleteUnlisted                           true → also delete every file not
+//                                            in `files` (Pull's full sync)
+// Returns {close, writes, deletes, reopen, summary}: `close` = tab uuids to
+// close first; `writes`/`deletes` = actions to dispatch; `reopen` = closed
+// block-program tabs to reopen afterwards (open-tab order); `summary` = the
+// same counts apply-files/upsert-files report. Files already holding the
+// requested contents get no action (no spurious undo stop in an open tab).
+function planLiveWrites({ files, before, openFileUuids, deleteUnlisted = false }) {
+    const metaByPath = new Map(before.metadata.map((m) => [m.path, m]));
+    const oldContents = new Map(before.contents.map((c) => [c.path, c.contents]));
     const open = new Set(openFileUuids);
-    const actions = [];
+    const close = new Set();
+    const reopen = new Set();
+    const writes = [];
+    const deletes = [];
+    const summary = { added: 0, changed: 0, deleted: 0, unchanged: 0 };
+    const wanted = new Set();
     for (const f of files) {
+        wanted.add(f.path);
         const existing = metaByPath.get(f.path);
-        if (existing && existing.sha256 === f.sha) continue;
-        if (existing && open.has(existing.uuid)) {
-            actions.push({ type: 'editor.action.replaceFile', uuid: existing.uuid, value: f.contents });
+        if (!existing) {
+            summary.added++;
+            writes.push({ type: 'fileStorage.action.writeFile', path: f.path, contents: f.contents });
+            continue;
+        }
+        if (existing.sha256 === f.sha) {
+            summary.unchanged++;
+            continue;
+        }
+        summary.changed++;
+        if (!open.has(existing.uuid)) {
+            writes.push({ type: 'fileStorage.action.writeFile', path: f.path, contents: f.contents });
+        } else if (isBlocksFile(oldContents.get(f.path)) || isBlocksFile(f.contents)) {
+            close.add(existing.uuid);
+            reopen.add(existing.uuid);
+            writes.push({ type: 'fileStorage.action.writeFile', path: f.path, contents: f.contents });
         } else {
-            actions.push({ type: 'fileStorage.action.writeFile', path: f.path, contents: f.contents });
+            writes.push({ type: 'editor.action.replaceFile', uuid: existing.uuid, value: f.contents });
         }
     }
-    return actions;
+    if (deleteUnlisted) {
+        for (const m of before.metadata) {
+            if (wanted.has(m.path)) continue;
+            summary.deleted++;
+            if (open.has(m.uuid)) close.add(m.uuid);
+            deletes.push({ type: 'fileStorage.action.deleteFile', path: m.path });
+        }
+    }
+    return {
+        close: openFileUuids.filter((u) => close.has(u)),
+        writes,
+        deletes,
+        reopen: openFileUuids.filter((u) => reopen.has(u)),
+        summary,
+    };
 }
 
-async function writeFilesLive({ files, timeoutMs = LIVE_WRITE_TIMEOUT_MS, rootEl } = {}) {
+async function writeFilesLive({ files, deleteUnlisted = false, timeoutMs = LIVE_WRITE_TIMEOUT_MS, rootEl } = {}) {
     const store = findAppStore(rootEl);
     if (!store) return { live: false, reason: 'Pybricks app store not found' };
     // Never reject: a throw from hashing, IDB, or the app's own reducers is
     // just another reason to fall back.
     try {
-        return await liveWriteAttempt(store, files, timeoutMs);
+        return await liveWriteAttempt(store, files, deleteUnlisted, timeoutMs);
     } catch (err) {
         return { live: false, reason: `Pybricks could not save the file this way: ${err && err.message ? err.message : err}` };
     }
 }
 
-async function liveWriteAttempt(store, files, timeoutMs) {
+// Polls `check` every 100ms until it returns true or the deadline passes.
+async function waitUntil(check, deadline) {
+    for (;;) {
+        if (await check()) return true;
+        if (Date.now() >= deadline) return false;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+}
+
+async function liveWriteAttempt(store, files, deleteUnlisted, timeoutMs) {
     const wanted = await Promise.all(
         files.map(async (f) => ({ path: f.path, contents: f.contents, sha: await sha256(f.contents) })),
     );
     const before = await readStores();
-    const actions = planLiveWrites(wanted, before.metadata, store.getState().editor.openFileUuids);
-    for (const action of actions) store.dispatch(action);
-
-    const deadline = Date.now() + timeoutMs;
-    for (;;) {
-        const now = await readStores();
-        const byPath = new Map(now.contents.map((c) => [c.path, c.contents]));
-        const shaByPath = new Map(now.metadata.map((m) => [m.path, m.sha256]));
-        const done = wanted.every(
-            (f) => byPath.get(f.path) === f.contents && shaByPath.get(f.path) === f.sha,
+    // Captured now, by value: the tabs and focus to plan around and restore.
+    const { openFileUuids, activeFileUuid } = store.getState().editor;
+    const plan = planLiveWrites({ files: wanted, before, openFileUuids, deleteUnlisted });
+    const openNow = () => store.getState().editor.openFileUuids;
+    let result;
+    try {
+        for (const uuid of plan.close) store.dispatch({ type: 'editor.action.closeFile', uuid });
+        const closed = await waitUntil(
+            () => plan.close.every((u) => !openNow().includes(u)),
+            Date.now() + timeoutMs,
         );
-        if (done) return { live: true, dispatched: actions.length };
-        if (Date.now() >= deadline) {
-            return { live: false, reason: 'Pybricks did not confirm the write in time' };
+        if (!closed) return (result = { live: false, reason: 'Pybricks did not close the affected tabs in time' });
+
+        for (const action of [...plan.writes, ...plan.deletes]) store.dispatch(action);
+
+        const gone = plan.deletes.map((a) => a.path);
+        const confirmed = await waitUntil(async () => {
+            const now = await readStores();
+            const byPath = new Map(now.contents.map((c) => [c.path, c.contents]));
+            const shaByPath = new Map(now.metadata.map((m) => [m.path, m.sha256]));
+            return (
+                wanted.every((f) => byPath.get(f.path) === f.contents && shaByPath.get(f.path) === f.sha) &&
+                gone.every((p) => !byPath.has(p) && !shaByPath.has(p))
+            );
+        }, Date.now() + timeoutMs);
+        if (!confirmed) return (result = { live: false, reason: 'Pybricks did not confirm the write in time' });
+        result = {
+            live: true,
+            dispatched: plan.writes.length + plan.deletes.length,
+            summary: plan.summary,
+        };
+        return result;
+    } finally {
+        // Best effort, success or not: bring back the block tabs we closed and
+        // put focus back where it was. A tab that won't reopen is reported,
+        // not treated as a failed write: the files are written and verified,
+        // and the raw fallback's reload couldn't restore the tab either (the
+        // close already dropped it from Pybricks' remembered tabs).
+        const { missing, activeRestored } = await reopenTabs(store, plan.reopen, activeFileUuid, timeoutMs);
+        if (result && result.live) {
+            if (missing.length) result.tabsNotReopened = missing;
+            if (!activeRestored) result.activeNotRestored = activeFileUuid;
         }
-        await new Promise((resolve) => setTimeout(resolve, 100));
     }
+}
+
+// Reopens `uuids` one at a time, then restores `activeUuid` as the active tab
+// (reopening a tab activates it, which would otherwise steal focus from an
+// unaffected file). Resolves {missing: uuids that did not reopen,
+// activeRestored: false only when focus could not be put back}. Neither is a
+// failed write — callers report them rather than reload (a reload would drop
+// the hub's Bluetooth link to fix a tab, and couldn't restore it anyway).
+async function reopenTabs(store, uuids, activeUuid, timeoutMs) {
+    const missing = [];
+    for (const uuid of uuids) {
+        store.dispatch({ type: 'editor.action.activateFile', uuid });
+        const reopened = await waitUntil(
+            () => store.getState().editor.openFileUuids.includes(uuid),
+            Date.now() + timeoutMs,
+        );
+        if (!reopened) missing.push(uuid);
+    }
+    const { editor } = store.getState();
+    let activeRestored = true;
+    if (uuids.length && activeUuid && editor.openFileUuids.includes(activeUuid) && editor.activeFileUuid !== activeUuid) {
+        store.dispatch({ type: 'editor.action.activateFile', uuid: activeUuid });
+        activeRestored = await waitUntil(
+            () => store.getState().editor.activeFileUuid === activeUuid,
+            Date.now() + timeoutMs,
+        );
+    }
+    return { missing, activeRestored };
 }
 
 async function readStores() {

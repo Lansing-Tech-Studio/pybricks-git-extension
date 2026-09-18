@@ -429,10 +429,16 @@ function makeMenuPanel(deps) {
         }
         setStatus('Creating…');
         try {
-            await pageRequest('upsert-files', { files: [{ path, contents: seed.contents }] });
-            await persist(true);
-            setStatus(`Created ${path} — reloading…`);
-            setTimeout(() => reload(), 800);
+            const { reloading } = await writeOrFallback([{ path, contents: seed.contents }]);
+            if (reloading) {
+                setStatus(`Created ${path} — reloading…`);
+                setTimeout(() => reload(), 800);
+                return;
+            }
+            // The file exists now; a failed panel refresh only means the
+            // programs list is stale — never report it as a failed create.
+            await refresh().catch((err) => console.warn('[pybricks-git] panel refresh after create failed:', err));
+            setStatus(`Created ${path} ✓`);
         } catch (err) {
             setStatus(`Couldn't create it: ${err.message}`);
         }
@@ -489,11 +495,12 @@ function makeMenuPanel(deps) {
             if (res.error) { skipped.push({ path: p.path, reason: res.error }); continue; }
             if (res.changed) updated.push({ path: p.path, contents: res.contents });
         }
+        let reloading = false;
         if (updated.length) {
             try {
-                await pageRequest('upsert-files', {
-                    files: updated.map((u) => ({ path: u.path, contents: u.contents })),
-                });
+                ({ reloading } = await writeOrFallback(
+                    updated.map((u) => ({ path: u.path, contents: u.contents })),
+                ));
             } catch (err) {
                 setStatus(`Saved the snapshot, but couldn't write the updates: ${err.message}`);
                 if (btn) btn.disabled = false;
@@ -507,13 +514,26 @@ function makeMenuPanel(deps) {
         }
         const report = { when: new Date().toISOString(), updated: updated.map((u) => u.path), skipped };
         await storageSet({ spliceReport: report });
-        if (updated.length) {
-            // Editor IDB changed under dexie-observable's back — reload so the
-            // app rebuilds from our write (same rule as Save/new-program). The
-            // report renders after the reload from the persisted spliceReport.
-            await persist(true);
+        if (reloading) {
+            // The raw fallback wrote under dexie-observable's back — reload so
+            // the app rebuilds from it. The report renders after the reload
+            // from the persisted spliceReport.
             setStatus(`Updated ${updated.length} program(s)… reloading`);
             setTimeout(() => reload(), 800);
+        } else if (updated.length) {
+            // Written through the app: refresh in place. refresh() re-reads the
+            // persisted spliceReport, so the report block shows right away. If
+            // the refresh fails, the programs are still updated — show the
+            // report we already have and keep the control usable.
+            try {
+                await refresh();
+            } catch (err) {
+                console.warn('[pybricks-git] panel refresh after update failed:', err);
+                state.spliceReport = report;
+                render();
+            }
+            setStatus(`Updated ${updated.length} program(s) ✓`);
+            if (btn) btn.disabled = false;
         } else {
             // Only skips — nothing was written, so no reload. Show the report
             // inline so the kid sees why each program was left alone.
@@ -898,6 +918,52 @@ function makeMenuPanel(deps) {
         displayEditorDismiss = dismiss;
     }
 
+    // --- refresh + live writes -------------------------------------------
+
+    // Re-reads files, manifest and splice report into an open panel — what a
+    // page reload used to do after a Pull or a setup change. Unsaved slot
+    // edits survive: `state.dirty` is read AFTER the await, so an edit made
+    // while loading is kept too. Skipped mid-save; saveConfig reloads state
+    // itself when it finishes.
+    async function refresh() {
+        if (!panel || saving) return;
+        const fresh = await loadState();
+        if (!panel || saving) return;
+        if (state && state.dirty) {
+            fresh.items = state.items;
+            fresh.dirty = true;
+            fresh.banner = state.banner;
+        }
+        state = fresh;
+        render();
+    }
+
+    // Writes `files` through the app (write-files-live: no reload, the hub's
+    // Bluetooth link survives). If the app can't be driven, falls back to the
+    // raw upsert-files and resolves {reloading: true}: the caller must then
+    // schedule the reload, because the raw write is invisible to the app.
+    async function writeOrFallback(files) {
+        let live;
+        try {
+            live = await pageRequest('write-files-live', { files });
+        } catch (err) {
+            live = { live: false, reason: err.message };
+        }
+        if (live.live) {
+            if (live.tabsNotReopened || live.activeNotRestored) {
+                console.warn('[pybricks-git] could not fully restore the editor tabs:', {
+                    tabsNotReopened: live.tabsNotReopened,
+                    activeNotRestored: live.activeNotRestored,
+                });
+            }
+            return { reloading: false };
+        }
+        console.warn('[pybricks-git] live write unavailable, reloading instead:', live.reason);
+        await pageRequest('upsert-files', { files });
+        await persist(true);
+        return { reloading: true };
+    }
+
     // --- save ------------------------------------------------------------
 
     // Save = regenerate the whole file and write ONLY that path. First choice
@@ -1016,5 +1082,5 @@ function makeMenuPanel(deps) {
         showNewProgramRow();
     }
 
-    return { toggle, open, close, isOpen, addSlot, newProgram };
+    return { toggle, open, close, isOpen, addSlot, newProgram, refresh };
 }
