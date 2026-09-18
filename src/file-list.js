@@ -13,12 +13,30 @@ function makeFileListWatcher(deps) {
     let teamSetup = null;
     let debounceTimer = null;
 
-    async function start() {
+    async function loadManifest() {
         const manifest = await storageGet('lastPullManifest');
         protectedPaths = new Set((manifest && manifest.protected) || []);
         teamSetup = (manifest && manifest.teamSetup) || null;
+    }
+
+    async function start() {
+        await loadManifest();
         const observer = new MutationObserver(scheduleDecorate);
         observer.observe(document.body, { childList: true, subtree: true });
+        scheduleDecorate();
+    }
+
+    // Re-reads the manifest after a Pull that didn't reload the page (a reload
+    // used to restart the watcher). Badges on files that are no longer
+    // protected come off; decorate() adds the new ones.
+    async function refresh() {
+        await loadManifest();
+        for (const badge of document.querySelectorAll('[data-pybricks-git-badge]')) {
+            const row = badge.closest('li[role="treeitem"]') || badge.parentNode;
+            const label = row && row.querySelector('span.bp5-tree-node-label');
+            const path = label ? label.textContent : null;
+            if (!path || !protectedPaths.has(path)) badge.remove();
+        }
         scheduleDecorate();
     }
 
@@ -226,5 +244,5 @@ function makeFileListWatcher(deps) {
         document.body.appendChild(menu);
     }
 
-    return { start };
+    return { start, refresh };
 }

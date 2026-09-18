@@ -328,20 +328,26 @@ function fakeRoot(store) {
 }
 
 // A fake store that behaves like Pybricks' sagas: replaceFile/writeFile end
-// in a Dexie write, done here with upsertFiles (after a tick, as a saga would).
-function fakeStore({ openFileUuids = [], initialized = true, onDispatch } = {}) {
+// in a Dexie write and deleteFile in a Dexie delete (done here with raw IDB,
+// after a tick, as a saga would); closeFile/activateFile update the open-tab
+// state. `state.editor` is live so tests can inspect tabs afterwards.
+function fakeStore({ openFileUuids = [], activeFileUuid = null, initialized = true, onDispatch, db } = {}) {
     const dispatched = [];
-    return {
+    const editor = { openFileUuids: [...openFileUuids], activeFileUuid };
+    const store = {
         dispatched,
-        getState: () => ({ editor: { openFileUuids }, fileStorage: { isInitialized: initialized } }),
+        editor,
+        getState: () => ({ editor, fileStorage: { isInitialized: initialized } }),
         dispatch(action) {
             dispatched.push(action);
-            if (onDispatch) onDispatch(action);
+            if (onDispatch) return onDispatch(action);
+            if (db) return actLikePybricks(action, db, editor);
         },
     };
+    return store;
 }
 
-async function actLikePybricks(action, db) {
+async function actLikePybricks(action, db, editor = { openFileUuids: [] }) {
     await new Promise((r) => setTimeout(r, 20));
     if (action.type === 'fileStorage.action.writeFile') {
         await upsertFiles({ files: [{ path: action.path, contents: action.contents }] });
@@ -349,6 +355,23 @@ async function actLikePybricks(action, db) {
         const meta = await getAll(db, 'metadata');
         const row = meta.find((m) => m.uuid === action.uuid);
         await upsertFiles({ files: [{ path: row.path, contents: action.value }] });
+    } else if (action.type === 'fileStorage.action.deleteFile') {
+        // One path only, like Pybricks' handleDeleteFile (a whole-set rewrite
+        // here would race the concurrent writes).
+        const row = (await getAll(db, 'metadata')).find((m) => m.path === action.path);
+        await new Promise((resolve, reject) => {
+            const tx = db.transaction(['metadata', '_contents'], 'readwrite');
+            tx.objectStore('metadata').delete(row.uuid);
+            tx.objectStore('_contents').delete(action.path);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } else if (action.type === 'editor.action.closeFile') {
+        editor.openFileUuids = editor.openFileUuids.filter((u) => u !== action.uuid);
+        if (editor.activeFileUuid === action.uuid) editor.activeFileUuid = null;
+    } else if (action.type === 'editor.action.activateFile') {
+        if (!editor.openFileUuids.includes(action.uuid)) editor.openFileUuids.push(action.uuid);
+        editor.activeFileUuid = action.uuid;
     }
 }
 
@@ -371,28 +394,71 @@ describe('findAppStore', () => {
 });
 
 describe('planLiveWrites', () => {
-    const meta = [
-        { path: 'menu_config.py', uuid: 'u-menu', sha256: 'old' },
-        { path: 'open.py', uuid: 'u-open', sha256: 'old' },
-        { path: 'same.py', uuid: 'u-same', sha256: 'same' },
+    const BLOCKS = '# pybricks blocks file:{"blocks":{}}\nprint(1)\n';
+    const before = {
+        metadata: [
+            { path: 'menu_config.py', uuid: 'u-menu', sha256: 'old' },
+            { path: 'open.py', uuid: 'u-open', sha256: 'old' },
+            { path: 'same.py', uuid: 'u-same', sha256: 'same' },
+            { path: 'blocks.py', uuid: 'u-blocks', sha256: 'old' },
+            { path: 'gone.py', uuid: 'u-gone', sha256: 'g' },
+            { path: 'gone_open.py', uuid: 'u-gone-open', sha256: 'g' },
+        ],
+        contents: [
+            { path: 'menu_config.py', contents: 'm' },
+            { path: 'open.py', contents: 'o' },
+            { path: 'same.py', contents: 's' },
+            { path: 'blocks.py', contents: BLOCKS },
+            { path: 'gone.py', contents: 'g' },
+            { path: 'gone_open.py', contents: 'g' },
+        ],
+    };
+    const files = [
+        { path: 'menu_config.py', contents: 'M', sha: 'new' },
+        { path: 'open.py', contents: 'O', sha: 'new' },
+        { path: 'same.py', contents: 'S', sha: 'same' },
+        { path: 'blocks.py', contents: BLOCKS + '# v2\n', sha: 'new' },
+        { path: 'fresh.py', contents: 'F', sha: 'new' },
     ];
+    const openFileUuids = ['u-gone-open', 'u-blocks', 'u-open', 'u-same'];
 
-    test('open files go through the editor, others through file storage, unchanged ones not at all', () => {
-        const actions = planLiveWrites(
-            [
-                { path: 'menu_config.py', contents: 'M', sha: 'new' },
-                { path: 'open.py', contents: 'O', sha: 'new' },
-                { path: 'same.py', contents: 'S', sha: 'same' },
-                { path: 'fresh.py', contents: 'F', sha: 'new' },
-            ],
-            meta,
-            ['u-open', 'u-same'],
-        );
-        assert.deepEqual(actions, [
+    test('upsert: open text files go through the editor, others through file storage', () => {
+        const plan = planLiveWrites({ files, before, openFileUuids });
+        assert.deepEqual(plan.writes, [
             { type: 'fileStorage.action.writeFile', path: 'menu_config.py', contents: 'M' },
             { type: 'editor.action.replaceFile', uuid: 'u-open', value: 'O' },
+            { type: 'fileStorage.action.writeFile', path: 'blocks.py', contents: BLOCKS + '# v2\n' },
             { type: 'fileStorage.action.writeFile', path: 'fresh.py', contents: 'F' },
         ]);
+        assert.deepEqual(plan.deletes, [], 'upsert never deletes');
+        assert.deepEqual(plan.summary, { added: 1, changed: 3, deleted: 0, unchanged: 1 });
+    });
+
+    test('an open block program is closed, written through file storage, and reopened', () => {
+        const plan = planLiveWrites({ files, before, openFileUuids });
+        assert.deepEqual(plan.close, ['u-blocks']);
+        assert.deepEqual(plan.reopen, ['u-blocks']);
+    });
+
+    test('a text file becoming a block program also takes the close/reopen path', () => {
+        const plan = planLiveWrites({
+            files: [{ path: 'open.py', contents: BLOCKS, sha: 'new' }],
+            before,
+            openFileUuids,
+        });
+        assert.deepEqual(plan.close, ['u-open']);
+        assert.deepEqual(plan.writes, [{ type: 'fileStorage.action.writeFile', path: 'open.py', contents: BLOCKS }]);
+    });
+
+    test('deleteUnlisted deletes every other file, closing (not reopening) open ones', () => {
+        const plan = planLiveWrites({ files, before, openFileUuids, deleteUnlisted: true });
+        assert.deepEqual(plan.deletes, [
+            { type: 'fileStorage.action.deleteFile', path: 'gone.py' },
+            { type: 'fileStorage.action.deleteFile', path: 'gone_open.py' },
+        ]);
+        assert.deepEqual(plan.close, ['u-gone-open', 'u-blocks'], 'close keeps open-tab order');
+        assert.deepEqual(plan.reopen, ['u-blocks'], 'a deleted file is never reopened');
+        assert.deepEqual(plan.summary, { added: 1, changed: 3, deleted: 2, unchanged: 1 });
     });
 });
 
@@ -400,12 +466,12 @@ describe('writeFilesLive', () => {
     test('writes a closed file through fileStorage and confirms it in IndexedDB', async () => {
         const db = await openPybricks();
         await seed(db, [{ path: 'menu_config.py', contents: 'old\n', uuid: 'u-menu', viewState: { top: 3 } }]);
-        const store = fakeStore({ onDispatch: (a) => actLikePybricks(a, db) });
+        const store = fakeStore({ db });
         const res = await writeFilesLive({
             files: [{ path: 'menu_config.py', contents: 'new\n' }],
             rootEl: fakeRoot(store),
         });
-        assert.deepEqual(res, { live: true, dispatched: 1 });
+        assert.deepEqual(res, { live: true, dispatched: 1, summary: { added: 0, changed: 1, deleted: 0, unchanged: 0 } });
         assert.equal(store.dispatched[0].type, 'fileStorage.action.writeFile');
         const snap = await snapshot(db);
         assert.equal(snap.byPath['menu_config.py'], 'new\n');
@@ -415,7 +481,7 @@ describe('writeFilesLive', () => {
     test('replaces an open file through the editor', async () => {
         const db = await openPybricks();
         await seed(db, [{ path: 'menu_config.py', contents: 'old\n', uuid: 'u-menu' }]);
-        const store = fakeStore({ openFileUuids: ['u-menu'], onDispatch: (a) => actLikePybricks(a, db) });
+        const store = fakeStore({ openFileUuids: ['u-menu'], db });
         const res = await writeFilesLive({
             files: [{ path: 'menu_config.py', contents: 'new\n' }],
             rootEl: fakeRoot(store),
@@ -426,7 +492,7 @@ describe('writeFilesLive', () => {
 
     test('creates a missing file through fileStorage', async () => {
         const db = await openPybricks();
-        const store = fakeStore({ onDispatch: (a) => actLikePybricks(a, db) });
+        const store = fakeStore({ db });
         const res = await writeFilesLive({
             files: [{ path: 'menu_config.py', contents: 'new\n' }],
             rootEl: fakeRoot(store),
@@ -443,7 +509,7 @@ describe('writeFilesLive', () => {
             files: [{ path: 'menu_config.py', contents: 'same\n' }],
             rootEl: fakeRoot(store),
         });
-        assert.deepEqual(res, { live: true, dispatched: 0 });
+        assert.deepEqual(res, { live: true, dispatched: 0, summary: { added: 0, changed: 0, deleted: 0, unchanged: 1 } });
         assert.deepEqual(store.dispatched, []);
     });
 
@@ -459,6 +525,84 @@ describe('writeFilesLive', () => {
         assert.equal(res.live, false);
         assert.match(res.reason, /did not confirm/);
         assert.equal((await snapshot(db)).byPath['menu_config.py'], 'old\n', 'nothing written behind the app');
+    });
+
+    test('deleteUnlisted syncs like apply-files: writes, deletes, and closes a deleted tab', async () => {
+        const db = await openPybricks();
+        await seed(db, [
+            { path: 'keep.py', contents: 'k1\n', uuid: 'u-keep' },
+            { path: 'gone.py', contents: 'g\n', uuid: 'u-gone' },
+        ]);
+        const store = fakeStore({ openFileUuids: ['u-gone', 'u-keep'], activeFileUuid: 'u-gone', db });
+        const res = await writeFilesLive({
+            files: [
+                { path: 'keep.py', contents: 'k2\n' },
+                { path: 'new.py', contents: 'n\n' },
+            ],
+            deleteUnlisted: true,
+            rootEl: fakeRoot(store),
+        });
+        assert.deepEqual(res, { live: true, dispatched: 3, summary: { added: 1, changed: 1, deleted: 1, unchanged: 0 } });
+        const snap = await snapshot(db);
+        assert.deepEqual(Object.keys(snap.byPath).sort(), ['keep.py', 'new.py']);
+        assert.equal(snap.byPath['keep.py'], 'k2\n');
+        assert.deepEqual(store.editor.openFileUuids, ['u-keep'], "the deleted file's tab was closed, not reopened");
+        const types = store.dispatched.map((a) => a.type);
+        assert.ok(
+            types.indexOf('editor.action.closeFile') < types.indexOf('fileStorage.action.deleteFile'),
+            'the tab is closed before the delete is dispatched',
+        );
+    });
+
+    test('an open block program is closed, rewritten, and reopened as the active tab', async () => {
+        const db = await openPybricks();
+        const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';
+        await seed(db, [
+            { path: 'prog.py', contents: BLOCKS + 'v1\n', uuid: 'u-prog' },
+            { path: 'other.py', contents: 'o\n', uuid: 'u-other' },
+        ]);
+        const store = fakeStore({ openFileUuids: ['u-other', 'u-prog'], activeFileUuid: 'u-prog', db });
+        const res = await writeFilesLive({
+            files: [{ path: 'prog.py', contents: BLOCKS + 'v2\n' }],
+            rootEl: fakeRoot(store),
+        });
+        assert.equal(res.live, true);
+        assert.equal((await snapshot(db)).byPath['prog.py'], BLOCKS + 'v2\n');
+        assert.deepEqual(
+            store.dispatched.map((a) => a.type),
+            ['editor.action.closeFile', 'fileStorage.action.writeFile', 'editor.action.activateFile'],
+        );
+        assert.deepEqual(store.editor.openFileUuids, ['u-other', 'u-prog']);
+        assert.equal(store.editor.activeFileUuid, 'u-prog');
+    });
+
+    test('closed block tabs are reopened even when the write is not confirmed', async () => {
+        const db = await openPybricks();
+        const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';
+        await seed(db, [{ path: 'prog.py', contents: BLOCKS + 'v1\n', uuid: 'u-prog' }]);
+        const store = fakeStore({
+            openFileUuids: ['u-prog'],
+            // Tabs work, but writes are swallowed (a renamed action type).
+            onDispatch: (a) => (a.type.startsWith('editor.') ? actLikePybricks(a, db, store.editor) : undefined),
+        });
+        const res = await writeFilesLive({
+            files: [{ path: 'prog.py', contents: BLOCKS + 'v2\n' }],
+            rootEl: fakeRoot(store),
+            timeoutMs: 300,
+        });
+        assert.equal(res.live, false);
+        assert.deepEqual(store.editor.openFileUuids, ['u-prog'], 'the tab came back');
+    });
+
+    test('a tab that will not close resolves live:false before anything is written', async () => {
+        const db = await openPybricks();
+        await seed(db, [{ path: 'gone.py', contents: 'g\n', uuid: 'u-gone' }]);
+        const store = fakeStore({ openFileUuids: ['u-gone'], onDispatch: () => {} });
+        const res = await writeFilesLive({ files: [], deleteUnlisted: true, rootEl: fakeRoot(store), timeoutMs: 300 });
+        assert.equal(res.live, false);
+        assert.match(res.reason, /did not close/);
+        assert.deepEqual(store.dispatched.map((a) => a.type), ['editor.action.closeFile']);
+        assert.equal((await snapshot(db)).byPath['gone.py'], 'g\n');
     });
 
     test('a throwing dispatch resolves live:false instead of rejecting', async () => {

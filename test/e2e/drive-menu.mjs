@@ -501,7 +501,9 @@ async function main() {
         }
 
         // -- Pull -----------------------------------------------------------
-        step(3, 'Pull the template repo, then wait for the reload');
+        step(3, 'Pull the template repo, with no reload');
+        await evalIsolated(`window.__pbgitNoReload = 1`, false);
+        const ctxBeforePull = isolatedCtx;
         const pullPt = await buttonRect('Pull');
         await trustedClick(pullPt);
         const rawPull = () =>
@@ -524,16 +526,11 @@ async function main() {
             `Pull label is "↓ +4 ~0 -0" (got "${pullLabel}")`,
         );
 
-        log('waiting for post-Pull reload...');
-        await poll(() => isolatedCtx === null, {
-            timeout: 15000,
-            what: 'reload to clear isolated context',
-        }).catch(() => log('note: did not observe context clear (may have raced)'));
-        await poll(async () => (await buttonRect('Pull')) != null, {
-            timeout: 40000,
-            what: 'buttons to remount after reload',
-        });
-        log('page reloaded, buttons remounted');
+        await sleep(2500); // the raw fallback reloads 1.5s after the label
+        assert(
+            isolatedCtx === ctxBeforePull && (await evalIsolated(`window.__pbgitNoReload === 1`, false)),
+            'the page did not reload after Pull',
+        );
 
         // -- Assert the persisted manifest (SW storage) ---------------------
         step(4, 'Assert lastPullManifest persisted by the engine');

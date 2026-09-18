@@ -46,9 +46,12 @@ have to rediscover them:
   center returns the overlay `DIV`, not the `BUTTON`). The driver dismisses the
   tour (clicks its `data-action="close"` button, Escape fallback) before driving
   the toolbar. This is environmental — not an extension bug.
-- **Pull triggers a reload.** After a non-empty apply, `content.js` schedules
-  `location.reload()` ~1.5s later; execution contexts are torn down and rebuilt,
-  so the driver re-enumerates the isolated world after the reload.
+- **Pull normally does NOT reload.** It writes through Pybricks' own store
+  (`write-files-live`), and the drivers assert that the page survived (same
+  isolated-context id, a `window` marker still set). Only the raw fallback
+  (forced in step 7a by nulling the MAIN-world `findAppStore`) schedules
+  `location.reload()` ~1.5s after the label. Execution contexts are then torn
+  down and rebuilt, so the driver re-enumerates the isolated world.
 
 ### What the driver does (maps to acceptance steps)
 
@@ -69,8 +72,8 @@ have to rediscover them:
    and captures `Runtime.exceptionThrown` (tagged `page:`) from attach onward.
 5. Waits for the toolbar buttons, dismisses the Welcome Tour, then **Pull**
    (trusted click) → asserts label `↓ +4 ~0 -0` (the four seeded `.py` files;
-   the manifest isn't `.py`, so it never reaches the editor) → waits for
-   reload → `pageRequest('list-files')` contains `starter.py`.
+   the manifest isn't `.py`, so it never reaches the editor) → asserts the
+   page did **not** reload → `pageRequest('list-files')` contains `starter.py`.
 6. Seeds a second file (`e2e.py`) via `pageRequest('apply-files', …)`, real-clicks
    **Commit**, trusted-types `e2e message`, trusted Enter → asserts the label
    timeline `Committing…` → `✓ <sha> ↑`.
@@ -81,23 +84,31 @@ have to rediscover them:
    `coach.py`), pushes a competing commit to the bare repo
    (`starter.py`/`keep.py`/`coach.py` changed, `gone.py` deleted), opens
    `keep.py` and `gone.py` as editor tabs (`editor.action.activateFile` on the
-   app's store), real-clicks **Pull** again → asserts label `↓ +1 ~3 -1` → waits for reload → asserts the
-   rescue notice names `starter.py`/`starter_mine.py` and says nothing about the
+   app's store), real-clicks **Pull** again → asserts label `↓ +1 ~3 -1` → asserts the
+   rescue notice (rendered immediately, no reload) names `starter.py`/`starter_mine.py` and says nothing about the
    untouched `keep.py` or the protected `coach.py` → asserts the post-merge
    IndexedDB: `scratch.py` (never committed) survives untouched, `starter.py`
    holds the repo's competing version, the local edit is rescued to
    `starter_mine.py`, `keep.py` silently took the upstream version with no
    `keep_mine.py` sibling, `gone.py` is gone, and `coach.py` took the repo's
    version with **no** `coach_mine.py` — protection overwrites, never rescues.
-   **Open-tab cleanup:** once Pybricks has reopened its remembered tabs, asserts
-   no "file with uuid '…' not found" toast was shown (toasts are recorded from
-   page load, since they auto-dismiss after 5s), that `gone.py` left the
-   sessionStorage tab history, and that `keep.py` is still in it. (Verified by
-   disabling the prune in `content.js`: the toast assertion fails.)
+   **Tabs, live:** the page did not reload; Pybricks closed `gone.py`'s tab
+   itself; `keep.py` is still open and its Monaco view shows the pulled
+   `keep v2` (the model was replaced in place, not left stale; verified by
+   sending open text tabs through `fileStorage.writeFile` instead: this
+   assertion fails); no "file with uuid '…' not found" toast (toasts are
+   recorded by a MutationObserver, since they auto-dismiss after 5s); and the
+   sessionStorage tab history lost `gone.py` but kept `keep.py`.
 9. **Deletion freshness.** Pushes another competing `keep.py`, deletes `keep.py`
    from IndexedDB (`apply-files` with it withheld), real-clicks **Commit** →
    asserts the push succeeded, the bare repo still holds the teammate's
    `keep.py`, and a `[data-pybricks-git-notice]` names the skipped deletion.
+9a. **Fallback Pull.** Closes every tab, opens only `e2e.py`, pushes its upstream
+   deletion, nulls the MAIN-world `findAppStore` so `write-files-live` returns
+   `{live:false}`, and Pulls → asserts the page **reloads** (`apply-files` path),
+   that no "not found" toast appears after the reload, that `e2e.py` left the tab
+   history, and that it was deleted. (Verified by disabling the tab prune in
+   `content.js`: the toast assertion fails.)
 10. Asserts zero **extension** exceptions across **both** the page and the
     service worker.
 11. Captures a screenshot, writing `toolbar.png`.
@@ -113,11 +124,12 @@ driver's own comments use for it:
 [e2e] === STEP 2: Configure settings via the service_worker target ===
 [e2e] PASS: settings written to chrome.storage.local via SW
 
-[e2e] === STEP 3: Pull: real-click, expect label "↓ +4 ~0 -0", then reload ===
+[e2e] === STEP 3: Pull: real-click, expect label "↓ +4 ~0 -0", with no reload ===
 [e2e]   pull label -> "Pulling…"
 [e2e]   pull label -> "↓ +4 ~0 -0"
 [e2e] PASS: Pull label is "↓ +4 ~0 -0" (got "↓ +4 ~0 -0")
-[e2e] PASS: starter.py present in editor IndexedDB after Pull+reload
+[e2e] PASS: the page did not reload after Pull
+[e2e] PASS: starter.py present in editor IndexedDB after Pull
 
 [e2e] === STEP 4: Seed a second file, then Commit with message "e2e message" ===
 [e2e] apply-files summary: { added: 1, changed: 0, deleted: 0, unchanged: 4 }
@@ -144,7 +156,11 @@ driver's own comments use for it:
 [e2e] PASS: exactly one keep.py in the editor
 [e2e] PASS: no keep_mine.py sibling for the untouched file
 [e2e] PASS: untouched gone.py went away with the upstream deletion
-[e2e] PASS: no "file … not found" toast after the reload ([])
+[e2e] PASS: the page did not reload after the merge Pull
+[e2e] PASS: the deleted gone.py's tab was closed
+[e2e] PASS: the changed keep.py is still an open tab
+[e2e] PASS: keep.py's open tab shows the pulled version (model replaced in place)
+[e2e] PASS: no "file … not found" toast after the Pull ([])
 [e2e] PASS: the deleted gone.py left Pybricks' open-tab history
 [e2e] PASS: the kept keep.py is still a remembered tab
 [e2e] PASS: the protected coach.py took the repo's version despite the local edit
@@ -155,6 +171,12 @@ driver's own comments use for it:
 [e2e] PASS: delete commit pushed (got "✓ <sha> ↑")
 [e2e] PASS: the teammate's keep.py survived a local deletion it never saw
 [e2e] PASS: the skipped deletion is reported to the kid by name
+
+[e2e] === STEP 7a: Fallback Pull (no store) reloads and leaves no stale tab behind ===
+[e2e] PASS: the fallback Pull reloaded the page
+[e2e] PASS: no "file … not found" toast after the fallback reload ([])
+[e2e] PASS: the deleted e2e.py left Pybricks' open-tab history
+[e2e] PASS: e2e.py was deleted by the fallback Pull
 
 [e2e] === STEP 8: Zero extension exceptions (page + service worker) ===
 [e2e] PASS: zero extension exceptions (saw 0)
@@ -170,9 +192,9 @@ driver's own comments use for it:
 
 | Action     | Button label timeline |
 |---|---|
-| Pull       | `Pull` → `Pulling…` → `↓ +4 ~0 -0` → (page reloads) |
+| Pull       | `Pull` → `Pulling…` → `↓ +4 ~0 -0` → `Pull` (no reload) |
 | Commit     | `Commit` → `Committing…` → `✓ <sha> ↑` |
-| Merge Pull | `Pull` → `Pulling…` → `↓ +1 ~3 -1` → (page reloads) |
+| Merge Pull | `Pull` → `Pulling…` → `↓ +1 ~3 -1` → `Pull` (no reload) |
 
 `toolbar.png` (committed alongside this README) is the final screenshot,
 taken after the deletion-freshness commit — the Commit button still reads
@@ -214,7 +236,7 @@ plain `mission_01.py`, and a setup-only **blocks** file `arm_moves.py` — then:
 
 1. Writes settings via the SW, dismisses the Welcome Tour, and **Pull**s (label
    `↓ +4 ~0 -0`; `.pybricks-git.json` is non-`.py`, so only the four `.py`
-   files apply), waiting for the reload.
+   files apply), asserting the page did **not** reload.
 2. Asserts the engine persisted `chrome.storage.local.lastPullManifest ===
    {protected:["menu.py"], menuConfig:"menu_config.py"}` (read via the SW target).
 3. Opens the **Menu** panel (`[data-pybricks-git-menu-btn]`), asserting the
@@ -338,8 +360,8 @@ Two related facts, both cost real debugging time:
 - **The file tree's label centre opens Rename, not the file.** Each row carries a
   `.pb-explorer-file-tree-action-toolbar`, and its rename button sits under the
   label centre. Click the row's **icon gutter** (`left + 14px`) to open a file.
-- **The Explorer is a toggle that survives a reload.** After the post-Update
-  reload the app restores it already open, so clicking the toolbar button blind
+- **The Explorer is a toggle that survives a reload.** After a reload the app
+  restores it already open, so clicking the toolbar button blind
   closes it. Check for the tree first, click only if it is absent.
 
 ## What it covers
@@ -352,21 +374,30 @@ derived from it by JSON surgery on the setup chain: `prog_match.py` (chain
 identical), `prog_differs.py` (one motor port changed → splices cleanly), and
 `prog_renamed.py` (a device renamed → `spliceSetup` skips). Then:
 
-1. Writes settings via the SW, dismisses the Welcome Tour, **Pull**s (`↓ +6 ~0 -0`),
-   and asserts `lastPullManifest` carries `teamSetup` + `protected`.
+1. Writes settings via the SW, dismisses the Welcome Tour, **Pull**s (`↓ +6 ~0 -0`,
+   no reload), and asserts `lastPullManifest` carries `teamSetup` + `protected`.
 2. Opens the Menu panel and asserts the **setup-differs nudge**:
    `[data-pybricks-git-setup-differs]` marks `prog_differs`/`prog_renamed`, not
    the matching `prog_match`; the `[data-pybricks-git-update-setup]` and
    `[data-pybricks-git-new-program]` buttons are present.
 3. **New program:** creates `my_new_one` via `[data-pybricks-git-new-program]`;
-   after the reload asserts `my_new_one.py` exists with `setupSignature` equal to
+   asserts the status `Created my_new_one.py ✓`, **no reload**, the open panel
+   already lists it (refreshed in place), and that `my_new_one.py` exists with `setupSignature` equal to
    `robot_setup.py`'s and a `blockGlobalStart` block. (Creating a local file also
    diverges the editor from the remote, so the next step's snapshot lands a real
    commit.)
-4. **Update robot setup:** clicks the button and, after the reload, asserts the
+4. **Update robot setup:** first opens `prog_differs.py` (a block program the
+   Update will rewrite) as the **active tab**, then clicks the button. Asserts
+   `Updated 1 program(s) ✓`, **no reload**, and that the block tab was reopened
+   and is still active (open block programs are closed, written and reopened,
+   never replaced under a live Blockly workspace). Without a licence, the
+   reopened tab brings back the "Enable block coding" dialog (a reload restoring
+   the tab did too), so the driver dismisses it. Then it asserts the
    **snapshot-first rail** harness-side — the remote gained a `Before robot setup
-   update` commit whose tree holds the **PRE-splice** `prog_differs.py` (the
-   spliced version lives only in editor IDB until the manual Commit), with
+   update` commit whose tree holds the **PRE-splice** `prog_differs.py` setup
+   (compared by `setupSignature`, not bytes: opening the file made the editor
+   regenerate its Python body from the blocks. The spliced version lives only in
+   editor IDB until the manual Commit), with
    `prog_renamed.py`/`menu.py` byte-identical. Browser-side it asserts the
    `[data-pybricks-git-splice-report]` block (updated: `prog_differs`; skipped:
    `prog_renamed` with the kid-facing reason) and that the editor `prog_differs.py`

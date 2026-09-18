@@ -482,7 +482,13 @@ async function main() {
             log('no welcome tour overlay present');
         }
 
-        step(3, 'Pull: real-click, expect label "↓ +4 ~0 -0", then reload');
+        step(3, 'Pull: real-click, expect label "↓ +4 ~0 -0", with no reload');
+        // Pull syncs through Pybricks' own store (write-files-live), so the page
+        // must NOT reload — a reload drops the hub's Bluetooth link. A marker on
+        // the isolated world's window and the context id prove the same
+        // document survived.
+        await evalIsolated(`window.__pbgitNoReload = 1`, false);
+        const ctxBeforePull = isolatedCtx;
         const pullPt = await buttonRect('Pull');
         log('Pull button center:', JSON.stringify(pullPt));
         log('elementFromPoint(pull center):', await elementAt(pullPt.x, pullPt.y));
@@ -513,25 +519,17 @@ async function main() {
             `Pull label is "↓ +4 ~0 -0" (got "${pullLabel}")`,
         );
 
-        // content.js reloads ~1.5s after a non-empty apply; wait for the
-        // context to be torn down and rebuilt.
-        log('waiting for post-Pull reload...');
-        await poll(() => isolatedCtx === null, {
-            timeout: 15000,
-            what: 'reload to clear isolated context',
-        }).catch(() => log('note: did not observe context clear (may have raced)'));
-        await poll(async () => (await buttonRect('Pull')) != null, {
-            timeout: 40000,
-            what: 'buttons to remount after reload',
-        });
-        log('page reloaded, buttons remounted');
+        await sleep(2500); // the raw fallback reloads 1.5s after the label
+        const noReload = async () =>
+            isolatedCtx === ctxBeforePull && (await evalIsolated(`window.__pbgitNoReload === 1`, false));
+        assert(await noReload(), 'the page did not reload after Pull');
 
         const afterPull = await evalIsolated(`pageRequest('list-files')`);
         const pulledPaths = afterPull.contents.map((c) => c.path);
         log('editor files after pull:', pulledPaths);
         assert(
             pulledPaths.some((p) => p === 'starter.py' || p.endsWith('/starter.py')),
-            'starter.py present in editor IndexedDB after Pull+reload',
+            'starter.py present in editor IndexedDB after Pull',
         );
 
         // -- Commit ---------------------------------------------------------
@@ -652,11 +650,11 @@ async function main() {
         );
         log('pushed competing change to the bare repo');
 
-        // Open gone.py (deleted upstream below) and keep.py (kept) in editor
-        // tabs, the way the Explorer does. Pybricks remembers open tabs in
-        // sessionStorage and reopens them after the reload; a stale uuid for
-        // gone.py would raise its "unexpected error … not found" toast. That
-        // toast auto-dismisses after 5s, so record every toast from load on.
+        // Open gone.py (deleted upstream below) and keep.py (changed upstream)
+        // in editor tabs, the way the Explorer does. The live Pull must close
+        // gone.py's tab itself (Pybricks' delete flow) and update keep.py's open
+        // model in place. Toasts auto-dismiss after 5s, so record every toast —
+        // in this document and in any later one (the fallback path reloads).
         const evalMain = async (expression) => {
             const r = await page.send('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
             if (r.exceptionDetails) {
@@ -664,14 +662,16 @@ async function main() {
             }
             return r.result.value;
         };
-        await page.send('Page.addScriptToEvaluateOnNewDocument', { source: `
-            window.__toasts = [];
+        const toastRecorder = `
+            window.__toasts = window.__toasts || [];
             new MutationObserver(() => {
                 for (const t of document.querySelectorAll('.bp5-toast')) {
                     if (!window.__toasts.includes(t.textContent)) window.__toasts.push(t.textContent);
                 }
             }).observe(document, { childList: true, subtree: true, characterData: true });
-        ` });
+        `;
+        await page.send('Page.addScriptToEvaluateOnNewDocument', { source: toastRecorder });
+        await evalMain(toastRecorder);
         const tabMeta = (await evalIsolated(`pageRequest('list-files')`)).metadata;
         const goneUuid = tabMeta.find((m) => m.path === 'gone.py').uuid;
         const keepUuid = tabMeta.find((m) => m.path === 'keep.py').uuid;
@@ -710,13 +710,6 @@ async function main() {
             `merge Pull label is "↓ +1 ~3 -1" (got "${mergeLabel}")`,
         );
 
-        log('waiting for post-merge reload...');
-        await poll(() => isolatedCtx === null, {
-            timeout: 15000,
-            what: 'reload to clear isolated context',
-        }).catch(() => log('note: did not observe context clear (may have raced)'));
-        // Read the notice before waiting on the toolbar: it is rendered by
-        // content.js at load and self-removes after 20s.
         const rescueText = await poll(
             () =>
                 evalIsolated(
@@ -738,26 +731,28 @@ async function main() {
             !/coach\.py/.test(rescueText),
             'rescue notice says nothing about the protected coach.py (overwritten, never rescued)',
         );
+        await sleep(2500); // the raw fallback reloads 1.5s after the label
+        assert(await noReload(), 'the page did not reload after the merge Pull');
 
-        await poll(async () => (await buttonRect('Pull')) != null, {
-            timeout: 40000,
-            what: 'buttons to remount after the merge reload',
-        });
-        // Pybricks reopens remembered tabs as the editor mounts; give it time
-        // to try (and to toast, if a stale uuid were still there).
-        await poll(() => evalMain(`findAppStore()?.getState().editor.openFileUuids.length > 0`), {
-            timeout: 20000,
-            what: 'Pybricks to reopen the remembered tabs',
-        });
-        await sleep(2000);
-        // The toast is the decisive check: once Pybricks reopens keep.py it
-        // rewrites the history from memory, which drops a stale gone.py uuid
-        // anyway — but only AFTER the failed reopen has already toasted.
-        // (Verified: with the prune disabled, only this assertion fails.)
+        // Tabs, handled live the way Pybricks' own Explorer would:
+        const tabs = await evalMain(`findAppStore().getState().editor`);
+        assert(!tabs.openFileUuids.includes(goneUuid), "the deleted gone.py's tab was closed");
+        assert(tabs.openFileUuids.includes(keepUuid), 'the changed keep.py is still an open tab');
+        // gone.py was active; closing it activates keep.py, whose open Monaco
+        // model must now show the pulled text (replaced in place, not stale).
+        const keepShown = await poll(
+            () =>
+                evalMain(
+                    // Monaco renders spaces as U+00A0; normalise before matching.
+                    `(document.querySelector('.monaco-editor .view-lines')?.textContent || '').replace(/\\u00a0/g, ' ').includes('keep v2')`,
+                ),
+            { timeout: 10000, interval: 250, what: "keep.py's open tab to show the pulled text" },
+        ).catch(() => false);
+        assert(keepShown, "keep.py's open tab shows the pulled version (model replaced in place)");
         const staleToasts = (await evalMain(`window.__toasts`)).filter((t) => /not found/.test(t));
         assert(
             staleToasts.length === 0,
-            `no "file … not found" toast after the reload (${JSON.stringify(staleToasts)})`,
+            `no "file … not found" toast after the Pull (${JSON.stringify(staleToasts)})`,
         );
         const historyAfter = await tabHistory();
         assert(!historyAfter.includes(goneUuid), "the deleted gone.py left Pybricks' open-tab history");
@@ -866,6 +861,56 @@ async function main() {
         assert(
             /keep\.py/.test(deleteNotice),
             'the skipped deletion is reported to the kid by name',
+        );
+
+        // -- Fallback Pull: raw apply + reload, with open-tab cleanup --------
+        // Hide the app store so write-files-live resolves {live:false}; Pull
+        // must fall back to apply-files + reload, and prune the deleted file's
+        // remembered tab first (otherwise the reload toasts "not found").
+        step('7a', 'Fallback Pull (no store) reloads and leaves no stale tab behind');
+        // Step 7 deleted keep.py behind the app's back (raw apply-files) while
+        // its tab was open — that stale tab is the test's doing, not Pull's, so
+        // start from a clean slate: close every tab, then open only e2e.py.
+        for (const uuid of await evalMain(`findAppStore().getState().editor.openFileUuids`)) {
+            await evalMain(`findAppStore().dispatch({ type: 'editor.action.closeFile', uuid: ${JSON.stringify(uuid)} })`);
+        }
+        await poll(() => evalMain(`findAppStore().getState().editor.openFileUuids.length === 0`), {
+            timeout: 10000,
+            what: 'all tabs to close',
+        });
+        const e2eUuid = (await evalIsolated(`pageRequest('list-files')`)).metadata.find((m) => m.path === 'e2e.py').uuid;
+        await evalMain(`findAppStore().dispatch({ type: 'editor.action.activateFile', uuid: ${JSON.stringify(e2eUuid)} })`);
+        await poll(() => evalMain(`findAppStore().getState().editor.openFileUuids.includes(${JSON.stringify(e2eUuid)})`), {
+            timeout: 10000,
+            what: 'e2e.py to open in a tab',
+        });
+        pushCompeting(bare, { 'e2e.py': null }, 'teammate deletes e2e.py');
+        await evalMain(`findAppStore = () => null`);
+        const ctxBeforeFallback = isolatedCtx;
+        await trustedClick(await buttonRect('Pull'));
+        await poll(() => isolatedCtx !== ctxBeforeFallback && isolatedCtx !== null, {
+            timeout: 30000,
+            what: 'the fallback Pull to reload the page',
+        });
+        await poll(async () => (await buttonRect('Pull')) != null, {
+            timeout: 40000,
+            what: 'buttons to remount after the fallback reload',
+        });
+        assert(true, 'the fallback Pull reloaded the page');
+        await poll(() => evalMain(`!!findAppStore()?.getState().editor.isReady`), {
+            timeout: 20000,
+            what: 'the editor to be ready after the reload',
+        });
+        await sleep(3000); // let Pybricks try to reopen remembered tabs (and toast)
+        const fallbackToasts = (await evalMain(`window.__toasts`)).filter((t) => /not found/.test(t));
+        assert(
+            fallbackToasts.length === 0,
+            `no "file … not found" toast after the fallback reload (${JSON.stringify(fallbackToasts)})`,
+        );
+        assert(!(await tabHistory()).includes(e2eUuid), "the deleted e2e.py left Pybricks' open-tab history");
+        assert(
+            !(await evalIsolated(`pageRequest('list-files')`)).contents.some((c) => c.path === 'e2e.py'),
+            'e2e.py was deleted by the fallback Pull',
         );
 
         // -- A failed Pull explains itself -----------------------------------
