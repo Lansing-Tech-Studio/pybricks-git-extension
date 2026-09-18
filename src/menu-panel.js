@@ -24,6 +24,15 @@ function makeMenuPanel(deps) {
     // Removes the popover plus its capture-phase window listeners; close() and
     // a reopen both route through it so nothing leaks (see openDisplayEditor).
     let displayEditorDismiss = null;
+    // Bumped by every slot edit (all of them go through markDirty). Save
+    // compares it across its awaits: the slot controls stay live while a save
+    // is in flight, and an edit made then must not be overwritten by the
+    // post-save refresh or discarded by the fallback reload.
+    let editRevision = 0;
+    // True from a Save click until it settles (and through a pending fallback
+    // reload). An edit mid-save re-renders the footer, and the Save button it
+    // draws must stay disabled so two saves can't race.
+    let saving = false;
 
     async function toggle() {
         if (panel) close();
@@ -308,9 +317,9 @@ function makeMenuPanel(deps) {
         const save = document.createElement('button');
         save.dataset.pybricksGitSave = '1';
         save.textContent = state.dirty ? 'Save menu' : 'Saved';
-        save.disabled = !state.dirty;
+        save.disabled = !state.dirty || saving;
         styleMiniButton(save);
-        save.addEventListener('click', () => void saveConfig(save));
+        save.addEventListener('click', () => void saveConfig());
         if (state.teamSetup) {
             const newBtn = miniIconButton(
                 '+ New program',
@@ -680,6 +689,7 @@ function makeMenuPanel(deps) {
     }
 
     function markDirty() {
+        editRevision++;
         state.dirty = true;
         render();
     }
@@ -890,32 +900,107 @@ function makeMenuPanel(deps) {
 
     // --- save ------------------------------------------------------------
 
-    // Save = regenerate the whole file and upsert ONLY that path. Always
-    // reload afterwards: dexie-observable can't see raw IDB writes, and if
-    // menu_config.py is open in Monaco a stale buffer would clobber this save
-    // on the app's next write. The persisted open flag reopens the panel.
-    async function saveConfig(saveBtn) {
+    // Save = regenerate the whole file and write ONLY that path. First choice
+    // is write-files-live: Pybricks' own store does the write (updating an open
+    // menu_config.py tab in place), so there's no page reload — a reload drops
+    // the hub's Bluetooth connection. If the app can't be driven (store not
+    // found, write not confirmed), fall back to the raw upsert + reload: with
+    // a raw write dexie-observable sees nothing, and an open menu_config.py tab
+    // would clobber the save on its next write. The persisted open flag
+    // reopens the panel after that reload.
+    async function saveConfig() {
+        if (saving) return;
+        saving = true;
+        let reloading = false;
+        try {
+            reloading = await doSave();
+        } finally {
+            // A scheduled reload keeps Save disabled until the page goes away.
+            saving = reloading;
+            const btn = panel && panel.querySelector('[data-pybricks-git-save]');
+            if (btn) btn.disabled = !state.dirty || saving;
+        }
+    }
+
+    // Resolves true when it has scheduled the fallback reload.
+    async function doSave() {
         for (const [i, item] of state.items.entries()) {
             const problem = validateItem(item);
             if (problem) {
                 setStatus(`Slot ${i + 1}: ${problem}`);
-                return;
+                return false;
             }
         }
-        saveBtn.disabled = true;
         setStatus('Saving…');
+        const savedRevision = editRevision;
+        // Every await below is a window for a slot edit; re-check after each.
+        const changedSince = (rev) => {
+            if (editRevision === rev) return false;
+            render(); // the newer slots, still dirty, with Save enabled
+            setStatus('Saved — but the menu changed while saving. Save again to keep those changes.');
+            return true;
+        };
+        const files = [{ path: state.menuConfigPath, contents: generateMenuConfig(state.items) }];
+        let live;
         try {
-            const text = generateMenuConfig(state.items);
+            live = await pageRequest('write-files-live', { files });
+        } catch (err) {
+            live = { live: false, reason: err.message };
+        }
+        if (live.live) {
+            // The earlier version is saved, but if the slots changed since,
+            // keep the newer edits instead of refreshing over them.
+            if (changedSince(savedRevision)) return false;
+            try {
+                const refreshed = await loadState();
+                if (changedSince(savedRevision)) return false;
+                state = refreshed;
+            } catch (err) {
+                if (changedSince(savedRevision)) return false;
+                // The file is saved; only the panel refresh failed. Keep the
+                // edited slots but mark them clean.
+                console.warn('[pybricks-git] menu panel refresh after save failed:', err);
+                state.dirty = false;
+                state.banner = '';
+            }
+            render();
+            setStatus('Saved ✓');
+            return false;
+        }
+        console.warn('[pybricks-git] live menu save unavailable, reloading instead:', live.reason);
+        // The fallback reload would discard any edit made while the live
+        // attempt ran, so write the slots as they are NOW.
+        for (const [i, item] of state.items.entries()) {
+            const problem = validateItem(item);
+            if (problem) {
+                setStatus(`Slot ${i + 1}: ${problem}`);
+                return false;
+            }
+        }
+        const fallbackRevision = editRevision;
+        try {
             await pageRequest('upsert-files', {
-                files: [{ path: state.menuConfigPath, contents: text }],
+                files: [{ path: state.menuConfigPath, contents: generateMenuConfig(state.items) }],
             });
+            if (changedSince(fallbackRevision)) return false;
             await persist(true);
+            if (changedSince(fallbackRevision)) return false;
             setStatus('Saved ✓ — reloading…');
-            setTimeout(() => reload(), 800);
+            // The pause lets the status be read; an edit made during it
+            // cancels the reload rather than being thrown away by it.
+            setTimeout(() => {
+                if (editRevision === fallbackRevision) {
+                    reload();
+                    return;
+                }
+                saving = false; // reload cancelled: the newer edits need a Save
+                changedSince(fallbackRevision);
+            }, 800);
+            return true;
         } catch (err) {
             console.error('[pybricks-git] menu save failed:', err);
             setStatus(`Save failed: ${err.message}`);
-            saveBtn.disabled = false;
+            return false;
         }
     }
 
