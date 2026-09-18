@@ -70,7 +70,8 @@ In rough priority order:
 
 1. Add the current extension version to the config dialog
 2. When there is a commit or pull error, give the user all the details.
-3. **Open-tab cleanup on delete** — when Pull deletes a file, also clean up its entry in Pybricks' "open tabs" state so the page doesn't log a non-fatal error after reload.
+3. Avoid needing a page refresh, which breaks bluetooth connection to the Prime hub, when the menu is updated.
+4. **Open-tab cleanup on delete** — when Pull deletes a file, also clean up its entry in Pybricks' "open tabs" state so the page doesn't log a non-fatal error after reload.
 
 ## License
 
