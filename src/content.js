@@ -498,8 +498,11 @@ async function pull(btn) {
         let goneUuids = [];
         if (live.live) {
             summary = live.summary;
-            if (live.tabsNotReopened) {
-                console.warn('[pybricks-git] Pull left some block-program tabs closed:', live.tabsNotReopened);
+            if (live.tabsNotReopened || live.activeNotRestored) {
+                console.warn('[pybricks-git] Pull could not fully restore the editor tabs:', {
+                    tabsNotReopened: live.tabsNotReopened,
+                    activeNotRestored: live.activeNotRestored,
+                });
             }
         } else {
             console.warn('[pybricks-git] live Pull unavailable, reloading instead:', live.reason);

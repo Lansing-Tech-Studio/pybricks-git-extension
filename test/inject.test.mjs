@@ -612,6 +612,33 @@ describe('writeFilesLive', () => {
         assert.equal((await snapshot(db)).byPath['prog.py'], BLOCKS + 'v2\n');
     });
 
+    test('focus that will not go back is reported, and the write still counts as live', async () => {
+        const db = await openPybricks();
+        const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';
+        await seed(db, [
+            { path: 'prog.py', contents: BLOCKS + 'v1\n', uuid: 'u-prog' },
+            { path: 'other.py', contents: 'o\n', uuid: 'u-other' },
+        ]);
+        const store = fakeStore({
+            openFileUuids: ['u-prog', 'u-other'],
+            activeFileUuid: 'u-other',
+            // Reopening u-prog works; re-activating u-other is swallowed.
+            onDispatch: (a) =>
+                a.type === 'editor.action.activateFile' && a.uuid === 'u-other'
+                    ? undefined
+                    : actLikePybricks(a, db, store.editor),
+        });
+        const res = await writeFilesLive({
+            files: [{ path: 'prog.py', contents: BLOCKS + 'v2\n' }],
+            rootEl: fakeRoot(store),
+            timeoutMs: 300,
+        });
+        assert.equal(res.live, true, 'files written and verified — focus alone is no reason to reload');
+        assert.equal(res.activeNotRestored, 'u-other');
+        assert.equal(res.tabsNotReopened, undefined);
+        assert.equal((await snapshot(db)).byPath['prog.py'], BLOCKS + 'v2\n');
+    });
+
     test('closed block tabs are reopened even when the write is not confirmed', async () => {
         const db = await openPybricks();
         const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';

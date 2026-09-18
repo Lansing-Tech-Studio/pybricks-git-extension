@@ -435,7 +435,9 @@ function makeMenuPanel(deps) {
                 setTimeout(() => reload(), 800);
                 return;
             }
-            await refresh();
+            // The file exists now; a failed panel refresh only means the
+            // programs list is stale — never report it as a failed create.
+            await refresh().catch((err) => console.warn('[pybricks-git] panel refresh after create failed:', err));
             setStatus(`Created ${path} ✓`);
         } catch (err) {
             setStatus(`Couldn't create it: ${err.message}`);
@@ -520,8 +522,16 @@ function makeMenuPanel(deps) {
             setTimeout(() => reload(), 800);
         } else if (updated.length) {
             // Written through the app: refresh in place. refresh() re-reads the
-            // persisted spliceReport, so the report block shows right away.
-            await refresh();
+            // persisted spliceReport, so the report block shows right away. If
+            // the refresh fails, the programs are still updated — show the
+            // report we already have and keep the control usable.
+            try {
+                await refresh();
+            } catch (err) {
+                console.warn('[pybricks-git] panel refresh after update failed:', err);
+                state.spliceReport = report;
+                render();
+            }
             setStatus(`Updated ${updated.length} program(s) ✓`);
             if (btn) btn.disabled = false;
         } else {
@@ -940,8 +950,11 @@ function makeMenuPanel(deps) {
             live = { live: false, reason: err.message };
         }
         if (live.live) {
-            if (live.tabsNotReopened) {
-                console.warn('[pybricks-git] some block-program tabs were left closed:', live.tabsNotReopened);
+            if (live.tabsNotReopened || live.activeNotRestored) {
+                console.warn('[pybricks-git] could not fully restore the editor tabs:', {
+                    tabsNotReopened: live.tabsNotReopened,
+                    activeNotRestored: live.activeNotRestored,
+                });
             }
             return { reloading: false };
         }

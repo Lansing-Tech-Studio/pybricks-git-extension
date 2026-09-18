@@ -322,8 +322,9 @@ async function liveWriteAttempt(store, files, deleteUnlisted, timeoutMs) {
         files.map(async (f) => ({ path: f.path, contents: f.contents, sha: await sha256(f.contents) })),
     );
     const before = await readStores();
-    const { editor } = store.getState();
-    const plan = planLiveWrites({ files: wanted, before, openFileUuids: editor.openFileUuids, deleteUnlisted });
+    // Captured now, by value: the tabs and focus to plan around and restore.
+    const { openFileUuids, activeFileUuid } = store.getState().editor;
+    const plan = planLiveWrites({ files: wanted, before, openFileUuids, deleteUnlisted });
     const openNow = () => store.getState().editor.openFileUuids;
     let result;
     try {
@@ -359,14 +360,20 @@ async function liveWriteAttempt(store, files, deleteUnlisted, timeoutMs) {
         // not treated as a failed write: the files are written and verified,
         // and the raw fallback's reload couldn't restore the tab either (the
         // close already dropped it from Pybricks' remembered tabs).
-        const missing = await reopenTabs(store, plan.reopen, editor.activeFileUuid, timeoutMs);
-        if (missing.length && result && result.live) result.tabsNotReopened = missing;
+        const { missing, activeRestored } = await reopenTabs(store, plan.reopen, activeFileUuid, timeoutMs);
+        if (result && result.live) {
+            if (missing.length) result.tabsNotReopened = missing;
+            if (!activeRestored) result.activeNotRestored = activeFileUuid;
+        }
     }
 }
 
 // Reopens `uuids` one at a time, then restores `activeUuid` as the active tab
 // (reopening a tab activates it, which would otherwise steal focus from an
-// unaffected file). Resolves the uuids that did not reopen.
+// unaffected file). Resolves {missing: uuids that did not reopen,
+// activeRestored: false only when focus could not be put back}. Neither is a
+// failed write — callers report them rather than reload (a reload would drop
+// the hub's Bluetooth link to fix a tab, and couldn't restore it anyway).
 async function reopenTabs(store, uuids, activeUuid, timeoutMs) {
     const missing = [];
     for (const uuid of uuids) {
@@ -378,11 +385,15 @@ async function reopenTabs(store, uuids, activeUuid, timeoutMs) {
         if (!reopened) missing.push(uuid);
     }
     const { editor } = store.getState();
+    let activeRestored = true;
     if (uuids.length && activeUuid && editor.openFileUuids.includes(activeUuid) && editor.activeFileUuid !== activeUuid) {
         store.dispatch({ type: 'editor.action.activateFile', uuid: activeUuid });
-        await waitUntil(() => store.getState().editor.activeFileUuid === activeUuid, Date.now() + timeoutMs);
+        activeRestored = await waitUntil(
+            () => store.getState().editor.activeFileUuid === activeUuid,
+            Date.now() + timeoutMs,
+        );
     }
-    return missing;
+    return { missing, activeRestored };
 }
 
 async function readStores() {
