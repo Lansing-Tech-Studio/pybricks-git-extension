@@ -1,0 +1,157 @@
+# CodeRabbit review configuration.
+# Schema: https://coderabbit.ai/integrations/schema.v2.json
+#
+# CLAUDE.md is picked up automatically as a coding guideline (it is in
+# CodeRabbit's default knowledge_base.code_guidelines patterns), so the
+# instructions below only pin the invariants most worth checking per path.
+
+language: en-US
+tone_instructions: >-
+  Be direct and concrete. Lead with correctness and data-loss risks. Skip
+  style nits: this is plain JS with no build step and no linter config, by design.
+
+reviews:
+  profile: chill
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: true
+
+  auto_review:
+    enabled: true
+    drafts: false
+
+  path_filters:
+    - "!vendor/**" # pinned third-party UMDs, see vendor/README.md
+    - "!dist/**"
+    - "!node_modules/**"
+    - "!package-lock.json"
+    - "!**/*.png"
+    - "!**/*.jpg"
+
+  path_instructions:
+    - path: "src/**/*.js"
+      instructions: |
+        Everything in src/ ships as-is: an unpacked Chrome MV3 extension with no
+        bundler. Flag any ESM `import`/`export` — background.js is a classic
+        service worker and the content scripts are classic scripts, and the Node
+        test loaders (test/load-*.mjs) evaluate them unmodified.
+        Block files (a first line starting `# pybricks blocks file:`) are opaque
+        text everywhere except src/blocksplice.js; flag code outside blocksplice.js
+        that parses, rewrites, or "cleans up" that line-1 JSON.
+        User-facing strings are read by kids on robotics teams: keep them plain,
+        with no stack traces or jargon in the headline text.
+
+    - path: "src/background.js"
+      instructions: |
+        The git engine: stateless, a fetch + build-on-head against the remote tip
+        for every op, and the lightning-fs gitdir is a disposable cache. Check:
+        - The token (settings.token) must never reach logs, error messages, or
+          `details` responses. describeError() must redact it and URL userinfo.
+        - Only a missing-branch fetch error may be treated as an empty repo; every
+          other fetch error must be rethrown.
+        - Commit never deletes a path that isn't in lastPullShas with a matching
+          tree sha, never changes protected paths, and skips unchanged payload
+          files only when a head was fetched.
+        - lastPullShas is written by content.js after apply-files resolves, never
+          by pullOp.
+        - The PushRejectedError retry loop stays bounded (3 attempts).
+        - Any op that fails must still call sendResponse with {error, ...} — never
+          leave the message channel hanging.
+
+    - path: "src/inject.js"
+      instructions: |
+        MAIN-world script that writes the page's IndexedDB directly. Check:
+        - apply-files DELETES every path it isn't given (full sync, used only by
+          Pull). Flag any new caller that uses it for a partial write; that is what
+          upsert-files / write-files-live are for.
+        - Existing metadata rows must keep viewState and uuid; only sha256 and
+          contents change.
+        - sha256() must stay byte-identical to content.js:sha256() (hex SHA-256 of
+          the UTF-8 contents).
+        - write-files-live drives Pybricks' Redux store through React internals.
+          It must stay best effort and self-verifying: resolve {live:false} rather
+          than throw or guess, so callers can fall back to upsert-files + reload.
+          Action shapes must match pybricks-code (src/editor/actions.ts,
+          src/fileStorage/actions.ts).
+
+    - path: "src/{menu-config,blocksplice,pullmerge}.js"
+      instructions: |
+        Pure helpers: no DOM, no chrome.*, no I/O, unit-tested under Node.
+        blocksplice.js functions must never throw; they return {..., error} with a
+        kid-facing message.
+        In menu-config.js the bundle-hint guard must stay a runtime name lookup
+        (`_BUNDLE_HINTS = False` then `if _BUNDLE_HINTS:`). Flag `if False:`,
+        `if 0:` or any other constant the compiler folds away, which silently
+        drops the imports.
+        pullmerge.js planPull() must never lose local work: locally edited files
+        are rescued to `<stem>_mine.py`, and never-committed files are kept.
+
+    - path: "src/{content,menu-panel,file-list}.js"
+      instructions: |
+        Classic ISOLATED-world scripts sharing one global scope, loaded in the
+        manifest's content_scripts order (menu-config, blocksplice, pullmerge,
+        menu-panel, file-list, content). A helper must be defined in an earlier
+        file than its caller.
+        The Update-robot-setup safety rail is non-negotiable: the snapshot commit
+        must resolve before any editor file is written, and a throw aborts with
+        nothing changed.
+        Consumers of lastPullManifest.protected must intersect it with the live
+        file list before badging or hiding.
+
+    - path: "manifest.json"
+      instructions: |
+        `http://127.0.0.1/*` in host_permissions is intentional (the browser E2E
+        harness). scripts/pack.mjs strips it from the Web Store zip. Don't flag
+        it; do flag a pack change that stops stripping it.
+        content_scripts order is load order and is significant (see src/ rules).
+
+    - path: "test/**"
+      instructions: |
+        Tests intentionally use the real `git` (>= 2.28), `python3` and `unzip`
+        binaries. Don't suggest mocking them: the python3 ModuleFinder tests exist
+        because a faked compiler would hide the constant-folding bug they guard.
+        Test files must match test/*.test.mjs to run; test/load-*.mjs are loaders,
+        not tests.
+        test/e2e/ drivers are manual smoke tests against the live code.pybricks.com
+        over raw CDP. They are not part of `npm test`.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        The release workflow publishes through the Chrome Web Store v2 API with
+        keyless Workload Identity Federation. Check store calls against the v2
+        discovery doc: the read method is `:fetchStatus`, and the upload enum is
+        SUCCEEDED/FAILED (not v1's SUCCESS/FAILURE). Publish must happen before the
+        version-bump commit and tag, so a failed publish persists nothing.
+
+  pre_merge_checks:
+    docstrings:
+      mode: "off" # the codebase uses explanatory comments, not JSDoc coverage
+    custom_checks:
+      - name: "Docs track contracts"
+        mode: warning
+        instructions: |
+          Pass if, whenever the PR adds, removes, or changes the shape of any of
+          the following, the same PR updates CLAUDE.md to match. Otherwise fail
+          and name the undocumented change.
+          - a message op handled by makeMessageHandler in src/background.js
+          - an op handled by handle() in src/inject.js
+          - a chrome.storage.local key read or written anywhere under src/
+          - the order of content_scripts in manifest.json
+          Pass if the PR touches none of these.
+
+  tools:
+    actionlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    gitleaks:
+      enabled: true
+    markdownlint:
+      enabled: true
+    yamllint:
+      enabled: true
+
+chat:
+  auto_reply: true
