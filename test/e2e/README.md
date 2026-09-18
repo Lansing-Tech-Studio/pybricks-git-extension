@@ -286,8 +286,11 @@ Recorded from a real passing run (Chromium 1228):
 ```
 
 `menu-panel.png` (committed alongside this README) is the screenshot after the
-push: the panel (still open, never reloaded) over the `menu_config.py` tab,
-which shows all 3 saved slots plus the typed `# kid edit`.
+push. It is taken after step 5d's clean fallback Save reloaded the page, so it
+shows the panel reopened from the persisted `open` flag over the restored
+`menu_config.py` tab. That tab holds the regenerated file: 3 slots, the first and
+third disabled. The typed `# kid edit` is gone, because Save rewrites the whole
+file and comments aren't kept.
 
 # `drive-splice.mjs` — phase-4 setup-splice round-trip
 
