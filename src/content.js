@@ -500,7 +500,10 @@ async function pull(btn) {
                 // in-memory tab history rewrites sessionStorage whenever a tab
                 // opens or closes, so an earlier prune could be undone.
                 try {
-                    pruneOpenTabs(sessionStorage, goneUuids);
+                    const entries = Object.keys(sessionStorage).map((k) => [k, sessionStorage.getItem(k)]);
+                    for (const [key, value] of planTabPrunes(entries, goneUuids)) {
+                        sessionStorage.setItem(key, value);
+                    }
                 } catch (err) {
                     // Storage can be unavailable; the cost is only Pybricks'
                     // own "file not found" toast after the reload.

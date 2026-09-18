@@ -2,7 +2,7 @@ import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { loadPullMerge } from './load-pullmerge.mjs';
 
-const { rescueName, planPull, deletedUuids, pruneTabHistory, pruneOpenTabs } = loadPullMerge();
+const { rescueName, planPull, deletedUuids, pruneTabHistory, planTabPrunes } = loadPullMerge();
 
 describe('rescueName', () => {
     test('inserts _mine before the extension', () => {
@@ -194,20 +194,6 @@ describe('planPull', () => {
 });
 
 describe('open-tab cleanup', () => {
-    // A minimal Web Storage stand-in (key/getItem/setItem/length).
-    function fakeStorage(entries) {
-        const m = new Map(Object.entries(entries));
-        return {
-            get length() {
-                return m.size;
-            },
-            key: (i) => [...m.keys()][i] ?? null,
-            getItem: (k) => (m.has(k) ? m.get(k) : null),
-            setItem: (k, v) => m.set(k, String(v)),
-            dump: () => Object.fromEntries(m),
-        };
-    }
-
     test('deletedUuids names the files missing from the kept set', () => {
         const meta = [
             { path: 'a.py', uuid: 'u-a' },
@@ -230,24 +216,19 @@ describe('open-tab cleanup', () => {
         assert.equal(pruneTabHistory(null, ['u-gone']), null);
     });
 
-    test('pruneOpenTabs rewrites only open-tab history keys that change', () => {
-        const storage = fakeStorage({
-            'activities.selectedActivity': '"activity.explorer"',
-            'editor.activeFileHistory.win1.vs.editor.ICodeEditor:1': '["u-a","u-gone"]',
-            'editor.activeFileHistory.win1.vs.editor.ICodeEditor:2': '["u-b"]',
-            'other.key': '["u-gone"]',
-        });
-        assert.equal(pruneOpenTabs(storage, ['u-gone']), 1);
-        assert.deepEqual(storage.dump(), {
-            'activities.selectedActivity': '"activity.explorer"',
-            'editor.activeFileHistory.win1.vs.editor.ICodeEditor:1': '["u-a"]',
-            'editor.activeFileHistory.win1.vs.editor.ICodeEditor:2': '["u-b"]',
-            'other.key': '["u-gone"]',
-        });
+    test('planTabPrunes rewrites only open-tab history keys that change', () => {
+        const entries = [
+            ['activities.selectedActivity', '"activity.explorer"'],
+            ['editor.activeFileHistory.win1.vs.editor.ICodeEditor:1', '["u-a","u-gone"]'],
+            ['editor.activeFileHistory.win1.vs.editor.ICodeEditor:2', '["u-b"]'],
+            ['other.key', '["u-gone"]'],
+        ];
+        assert.deepEqual(planTabPrunes(entries, ['u-gone']), [
+            ['editor.activeFileHistory.win1.vs.editor.ICodeEditor:1', '["u-a"]'],
+        ]);
     });
 
-    test('pruneOpenTabs does nothing with no deleted uuids', () => {
-        const storage = fakeStorage({ 'editor.activeFileHistory.w.e': '["u-a"]' });
-        assert.equal(pruneOpenTabs(storage, []), 0);
+    test('planTabPrunes plans nothing with no deleted uuids', () => {
+        assert.deepEqual(planTabPrunes([['editor.activeFileHistory.w.e', '["u-a"]']], []), []);
     });
 });

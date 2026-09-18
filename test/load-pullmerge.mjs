@@ -12,7 +12,7 @@ const srcPath = path.join(here, '..', 'src', 'pullmerge.js');
 export function loadPullMerge() {
     const src =
         readFileSync(srcPath, 'utf8') +
-        '\n;globalThis.__pybricksPullMergeTest = { rescueName, planPull, deletedUuids, pruneTabHistory, pruneOpenTabs };';
+        '\n;globalThis.__pybricksPullMergeTest = { rescueName, planPull, deletedUuids, pruneTabHistory, planTabPrunes };';
     // eslint-disable-next-line no-new-func
     new Function(src)();
     return globalThis.__pybricksPullMergeTest;

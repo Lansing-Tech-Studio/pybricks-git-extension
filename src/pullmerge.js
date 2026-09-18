@@ -80,7 +80,8 @@ function planPull({ local, repo, base = {}, protectedPaths = [] }) {
 // (pybricks-code src/editor/lib.ts ActiveFileHistoryManager), and reopens each
 // on load. A uuid whose file a Pull deleted fails that reopen with an
 // "unexpected error" toast ("file with uuid '…' not found"). These helpers
-// find the uuids a Pull removes and prune them from that history.
+// find the uuids a Pull removes and plan pruning them from that history;
+// content.js does the sessionStorage reads and writes.
 
 const OPEN_TAB_HISTORY_PREFIX = 'editor.activeFileHistory.';
 
@@ -109,20 +110,17 @@ function pruneTabHistory(value, uuids) {
     return pruned.length === history.length ? null : JSON.stringify(pruned);
 }
 
-// Applies pruneTabHistory to every open-tab history key in `storage` (a Web
-// Storage object — sessionStorage in the page). Returns the number of keys
-// rewritten.
-function pruneOpenTabs(storage, uuids) {
-    if (!uuids.length) return 0;
-    let rewritten = 0;
-    for (let i = 0; i < storage.length; i++) {
-        const key = storage.key(i);
-        if (!key || !key.startsWith(OPEN_TAB_HISTORY_PREFIX)) continue;
-        const next = pruneTabHistory(storage.getItem(key), uuids);
-        if (next !== null) {
-            storage.setItem(key, next);
-            rewritten++;
-        }
+// Plans the rewrites for every open-tab history entry. `entries` is
+// [[key, value]] as read from sessionStorage by the caller (content.js does
+// the storage I/O; this stays pure). Returns [[key, newValue]] for just the
+// keys that change.
+function planTabPrunes(entries, uuids) {
+    if (!uuids.length) return [];
+    const writes = [];
+    for (const [key, value] of entries) {
+        if (typeof key !== 'string' || !key.startsWith(OPEN_TAB_HISTORY_PREFIX)) continue;
+        const next = pruneTabHistory(value, uuids);
+        if (next !== null) writes.push([key, next]);
     }
-    return rewritten;
+    return writes;
 }
