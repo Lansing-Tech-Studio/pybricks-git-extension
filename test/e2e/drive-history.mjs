@@ -478,14 +478,41 @@ async function main() {
         );
         await poll(async () => /compared to now/.test((await textOf('[data-pybricks-git-history-heading]')) || ''), { timeout: 15000, what: 'now-mode heading' });
         await poll(() => exists('[data-pybricks-git-history-restore="a.py"]'), { timeout: 15000, what: 'Restore button for a.py' });
+        // Edit a.py again WITHOUT clicking in the panel, so the diff on screen
+        // is stale when Restore is armed. Arming must re-read the editor: the
+        // diff beside the armed button has to show what the second click
+        // will replace.
+        await evalIsolated(
+            `pageRequest('upsert-files', { files: [{ path: 'a.py', contents: 'print("a v3")\\nprint("edited")\\nprint("later")\\n' }] })`,
+        );
+        const staleAdds = await evalIsolated(
+            `[...document.querySelectorAll('[data-pybricks-git-history-file="a.py"] [data-pybricks-git-history-line="add"]')].length`,
+            false,
+        );
+        assert(staleAdds === 2, `the diff is stale before Restore is armed: v2 → edited v3 is 2 added lines (got ${staleAdds})`);
         await clickSelector('[data-pybricks-git-history-restore="a.py"]', 'Restore (first click)');
         const armed = await poll(async () => ((await textOf('[data-pybricks-git-history-restore="a.py"]')) === 'Replace current file?' ? true : null), {
             timeout: 5000,
             what: 'Restore to arm',
         });
         assert(armed, 'first click arms the button: "Replace current file?"');
+        const freshAdds = await poll(
+            async () => {
+                const n = await evalIsolated(
+                    `[...document.querySelectorAll('[data-pybricks-git-history-file="a.py"] [data-pybricks-git-history-line="add"]')].length`,
+                    false,
+                );
+                return n === 3 ? n : null;
+            },
+            { timeout: 10000, what: 'arming to re-read the editor' },
+        );
+        assert(freshAdds === 3, 'arming Restore re-read the editor: the diff now shows all 3 added lines');
+        assert(
+            (await textOf('[data-pybricks-git-history-restore="a.py"]')) === 'Replace current file?',
+            'the button stayed armed across the re-render',
+        );
         const editorBefore = (await evalIsolated(`pageRequest('list-files')`)).contents.find((c) => c.path === 'a.py').contents;
-        assert(editorBefore === 'print("a v3")\nprint("edited")\n', 'a.py is still the edited copy before the second click');
+        assert(editorBefore === 'print("a v3")\nprint("edited")\nprint("later")\n', 'a.py is still the edited copy before the second click');
         const ctxBeforeRestore = isolatedCtx;
         await clickSelector('[data-pybricks-git-history-restore="a.py"]', 'Restore (second click)');
         const status = await poll(
@@ -533,6 +560,15 @@ async function main() {
         });
         assert(rows4 === 4, 'history refreshed itself after the Commit');
         assert(bareSubjects(bare)[0] === 'restored a.py', 'the commit reached the git server');
+
+        step('10b', 'Concurrent open() calls build the panel once');
+        await clickSelector('[data-pybricks-git-history-panel-close]', 'History close button');
+        await poll(async () => !(await exists('[data-pybricks-git-history-panel]')), { timeout: 5000, what: 'panel to close' });
+        await evalIsolated(`Promise.all([historyPanel.open(), historyPanel.open(), historyPanel.toggle()])`);
+        assert(await exists('[data-pybricks-git-history-panel]'), 'panel reopened');
+        assert((await count('[data-pybricks-git-history-controls]')) === 1, 'exactly one control bar after three overlapping open calls');
+        assert((await count('[data-pybricks-git-history-list]')) === 1, 'exactly one commit list after three overlapping open calls');
+        assert((await count('[data-pybricks-git-history-commit]')) === 4, 'the reopened panel lists the 4 commits');
 
         step(11, 'Zero extension exceptions (page + service worker)');
         if (extExceptions.length) for (const e of extExceptions) log('  captured:', e.split('\n')[0]);

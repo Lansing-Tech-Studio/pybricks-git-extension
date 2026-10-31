@@ -60,14 +60,28 @@ function makeHistoryPanel(deps) {
 
     // --- open / close ----------------------------------------------------------
 
-    async function open() {
-        if (shell.isOpen()) return;
-        await shell.open(async (saved) => {
-            state.wholeFile = Boolean(saved && saved.wholeFile);
-            state.mode = 'now';
-        });
-        buildBody();
-        await refresh();
+    // In-flight open() promise. The shell guards its own open(), but this
+    // wrapper also builds the body and loads history, so two callers (a
+    // double-click, or a click during the reopen-after-reload) must share the
+    // whole sequence or the panel gets two control bars and two fetches.
+    let opening = null;
+
+    function open() {
+        if (shell.isOpen()) return Promise.resolve();
+        if (opening) return opening;
+        opening = (async () => {
+            try {
+                await shell.open(async (saved) => {
+                    state.wholeFile = Boolean(saved && saved.wholeFile);
+                    state.mode = 'now';
+                });
+                buildBody();
+                await refresh();
+            } finally {
+                opening = null;
+            }
+        })();
+        return opening;
     }
 
     function close() {
@@ -606,6 +620,10 @@ function makeHistoryPanel(deps) {
             if (state.restoring) return;
             if (state.confirmPath !== path) {
                 armConfirm(path);
+                // stopPropagation above keeps the panel's click listener from
+                // running, so re-read the editor here: the diff beside an armed
+                // button must show exactly what the second click will replace.
+                if (state.mode === 'now') void refreshNowIfChanged();
                 return;
             }
             clearConfirm();
