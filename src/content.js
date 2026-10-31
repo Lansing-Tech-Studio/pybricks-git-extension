@@ -50,6 +50,22 @@ const fileListWatcher = makeFileListWatcher({
 });
 fileListWatcher.start().catch((err) => console.warn('[pybricks-git] file-list watcher failed:', err));
 
+const historyPanel = makeHistoryPanel({
+    pageRequest,
+    serverRequest,
+    storageGet,
+    storageSet,
+    reload: () => location.reload(),
+    showError: (op, err) => showErrorPanel(op, err),
+    // A restored file may be menu_config.py or a protected file, so the menu
+    // panel and the file list re-read, as they do after a live Pull.
+    afterRestore: () =>
+        Promise.all([
+            menuPanel.refresh().catch((err) => console.warn('[pybricks-git] panel refresh failed:', err)),
+            fileListWatcher.refresh().catch((err) => console.warn('[pybricks-git] file-list refresh failed:', err)),
+        ]),
+});
+
 mountButton().catch((err) => console.warn('[pybricks-git] mount failed:', err));
 
 showRescueNotice().catch((err) => console.warn('[pybricks-git] rescue notice failed:', err));
@@ -76,12 +92,22 @@ async function mountButton() {
     });
     toolbar.appendChild(menuBtn);
 
-    // Reopen the panel after the reload that Save/Pull triggers.
+    const historyBtn = makeBtn('History', 'Pybricks Git: see past commits and what changed');
+    historyBtn.dataset.pybricksGitHistoryBtn = '1';
+    historyBtn.addEventListener('click', () => {
+        historyPanel.toggle().catch((err) => console.error('[pybricks-git] history panel failed:', err));
+    });
+    toolbar.appendChild(historyBtn);
+
+    // Reopen the panels after the reload that Save/Pull/Restore triggers.
     const saved = await new Promise((resolve) =>
-        chrome.storage.local.get('menuPanel', (v) => resolve(v.menuPanel)),
+        chrome.storage.local.get(['menuPanel', 'historyPanel'], (v) => resolve(v)),
     );
-    if (saved && saved.open) {
+    if (saved.menuPanel && saved.menuPanel.open) {
         menuPanel.open().catch((err) => console.warn('[pybricks-git] panel reopen failed:', err));
+    }
+    if (saved.historyPanel && saved.historyPanel.open) {
+        historyPanel.open().catch((err) => console.warn('[pybricks-git] history panel reopen failed:', err));
     }
 }
 
@@ -200,6 +226,9 @@ async function commit(btn, message) {
         const label = result.committed ? `✓ ${result.head}` : 'no changes';
         btn.textContent = label + (result.pushed ? ' ↑' : '');
         setTimeout(() => (btn.textContent = original), 3000);
+        if (result.committed && result.pushed) {
+            historyPanel.refresh().catch((err) => console.warn('[pybricks-git] history refresh failed:', err));
+        }
     } catch (err) {
         console.error('[pybricks-git] commit failed:', err);
         showErrorPanel('Commit', err);
@@ -528,6 +557,7 @@ async function pull(btn) {
             await Promise.all([
                 menuPanel.refresh().catch((err) => console.warn('[pybricks-git] panel refresh failed:', err)),
                 fileListWatcher.refresh().catch((err) => console.warn('[pybricks-git] file-list refresh failed:', err)),
+                historyPanel.refresh().catch((err) => console.warn('[pybricks-git] history refresh failed:', err)),
             ]);
             setTimeout(() => (btn.textContent = original), 3000);
             return;

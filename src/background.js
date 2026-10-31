@@ -14,6 +14,8 @@ function makeEngine(deps) {
         status: () => statusOp(d),
         pull: () => pullOp(d),
         commit: (msg) => commitOp(d, msg ?? {}),
+        history: (opts) => historyOp(d, opts ?? {}),
+        filesAt: (opts) => filesAtOp(d, opts ?? {}),
         errorContext: () => errorContextOp(d),
     };
 }
@@ -55,15 +57,22 @@ async function statusOp(d) {
     return { ok: true, configured: isConfigured(s), branch: s.branch, head: null };
 }
 
-// Fetches the remote branch tip into the cache gitdir. Returns its oid, or
-// null when the branch has no commits yet (a fresh/empty fork, or a branch
-// that hasn't been pushed). Most hosts surface that as fetch resolving with
-// fetchHead: null (fetch goes through the registered `origin` remote, so no
-// throw); some throw "Could not find refs/heads/<branch>" instead — that one
-// message is the only failure we treat as empty. Every other fetch error
-// (404 wrong URL, 401 bad auth, empty/broken server response, etc.) is a real
-// failure and is rethrown so the user sees it rather than a false "no commits".
-async function fetchRemoteHead(d, s) {
+// Fetches the remote branch tip into the cache gitdir, `depth` commits deep.
+// Returns its oid, or null when the branch has no commits yet (a fresh/empty
+// fork, or a branch that hasn't been pushed). Most hosts surface that as fetch
+// resolving with fetchHead: null (fetch goes through the registered `origin`
+// remote, so no throw); some throw "Could not find refs/heads/<branch>"
+// instead — that one message is the only failure we treat as empty. Every
+// other fetch error (404 wrong URL, 401 bad auth, empty/broken server
+// response, etc.) is a real failure and is rethrown so the user sees it rather
+// than a false "no commits".
+//
+// Pull and Commit fetch at depth 1 (fetchRemoteHead): they only need the tip's
+// tree. History fetches deeper. isomorphic-git records a commit in the
+// `shallow` file only when one of its parents is missing locally, so a later
+// depth-1 fetch does not re-shallow a tip whose history is already cached —
+// the chain stays walkable until the gitdir is wiped.
+async function fetchBranch(d, s, depth) {
     await d.git.init({ fs: d.fs, gitdir: d.gitdir, bare: true });
     // Register a named remote so fetch has a refspec to store the fetched ref
     // under. Fetching with a raw `url` throws NoRefspecError because a bare
@@ -77,7 +86,7 @@ async function fetchRemoteHead(d, s) {
             remote: 'origin',
             ref: s.branch,
             singleBranch: true,
-            depth: 1,
+            depth,
             tags: false,
             onAuth: onAuth(s),
         });
@@ -89,6 +98,10 @@ async function fetchRemoteHead(d, s) {
         }
         throw err;
     }
+}
+
+function fetchRemoteHead(d, s) {
+    return fetchBranch(d, s, 1);
 }
 
 // Full recursive listing of a commit's tree: path -> {oid, mode}.
@@ -146,6 +159,21 @@ async function readProtectedPaths(d, fileMap) {
     return (await readManifestInfo(d, fileMap)).protected;
 }
 
+// The editor's view of a commit: every non-internal .py file, decoded. This is
+// the one definition of "which repo files the editor sees" — Pull applies it,
+// History diffs it — so the viewer can never show a file Pull would hide.
+// Returns the full tree listing too, for callers that also need the manifest.
+async function readPyFiles(d, commitOid) {
+    const all = await listAllFiles(d, commitOid);
+    const files = [];
+    for (const [path, entry] of all) {
+        if (!path.endsWith('.py') || isRepoInternal(path)) continue;
+        const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
+        files.push({ path, contents: new TextDecoder().decode(blob) });
+    }
+    return { files, all };
+}
+
 // Hex sha256 of a contents string — byte-identical to what Pybricks stores on
 // each metadata row and what inject.js:sha256() computes, so the engine's shas
 // and the editor's compare directly with no conversion.
@@ -160,16 +188,12 @@ async function pullOp(d) {
     const s = await getSettings(d);
     requireConfigured(s);
     const head = await fetchRemoteHead(d, s);
-    const files = [];
+    let files = [];
     let manifestInfo = { protected: new Set(), menuConfig: null, setupTemplate: null, teamSetup: null };
     if (head) {
-        const all = await listAllFiles(d, head);
-        manifestInfo = await readManifestInfo(d, all);
-        for (const [path, entry] of all) {
-            if (!path.endsWith('.py') || isRepoInternal(path)) continue;
-            const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
-            files.push({ path, contents: new TextDecoder().decode(blob) });
-        }
+        const read = await readPyFiles(d, head);
+        files = read.files;
+        manifestInfo = await readManifestInfo(d, read.all);
     }
     // The base snapshot is RETURNED, never stored here: it may only advance once
     // the editor actually holds these files, and the apply happens later, in
@@ -201,6 +225,78 @@ async function pullOp(d) {
               )
             : null,
     };
+}
+
+// --- History ----------------------------------------------------------------
+
+const HISTORY_DEFAULT_DEPTH = 20;
+const HISTORY_MAX_DEPTH = 200;
+
+function clampDepth(depth) {
+    const n = Number.isFinite(depth) ? Math.floor(depth) : HISTORY_DEFAULT_DEPTH;
+    return Math.min(HISTORY_MAX_DEPTH, Math.max(1, n));
+}
+
+function isNotFound(err) {
+    return Boolean(err && err.code === 'NotFoundError');
+}
+
+// Lists the branch's history: the commits reachable from the tip by first
+// parent, newest first, at most `depth` of them. Fetches depth + 1 so the
+// oldest listed commit's parent (its "before" tree and blobs) is present too —
+// every listed commit can show a diff. Walking first parents (not `git.log`,
+// which walks all parents and sorts by timestamp) keeps a merge commit as one
+// row whose diff is everything the merge brought in. The walk stops at the
+// shallow boundary (readCommit throws NotFoundError for the unfetched parent)
+// or at a root commit.
+async function historyOp(d, { depth } = {}) {
+    const s = await getSettings(d);
+    requireConfigured(s);
+    const want = clampDepth(depth);
+    const head = await fetchBranch(d, s, want + 1);
+    if (!head) return { head: null, commits: [], hasMore: false };
+    const walked = [];
+    let oid = head;
+    while (oid && walked.length < want + 1) {
+        let commit;
+        try {
+            ({ commit } = await d.git.readCommit({ fs: d.fs, gitdir: d.gitdir, oid }));
+        } catch (err) {
+            if (isNotFound(err)) break;
+            throw err;
+        }
+        walked.push({
+            oid,
+            parent: commit.parent[0] ?? null,
+            parents: commit.parent.length,
+            message: commit.message,
+            author: { name: commit.author.name, timestamp: commit.author.timestamp },
+        });
+        oid = commit.parent[0] ?? null;
+    }
+    // The depth+1 probe commit, if walked, is exactly what "Load older" would
+    // show next — its own parent (or lack of one) says nothing about that.
+    const commits = walked.slice(0, want);
+    const hasMore = walked.length > want;
+    return { head, commits, hasMore };
+}
+
+// The editor-visible files of one commit, read from the cache gitdir. Normally
+// no network: History's fetch already brought the objects in. If the object
+// is missing (the gitdir was wiped — CLAUDE.md promises that's always safe),
+// re-run History's fetch once and retry; anything still missing is a real
+// error. The oid comes from the page, so it is validated before use.
+async function filesAtOp(d, { oid, depth } = {}) {
+    if (!/^[0-9a-f]{40}$/.test(oid ?? '')) throw new Error(`invalid commit id: ${oid}`);
+    const s = await getSettings(d);
+    requireConfigured(s);
+    try {
+        return { oid, files: (await readPyFiles(d, oid)).files };
+    } catch (err) {
+        if (!isNotFound(err)) throw err;
+    }
+    await fetchBranch(d, s, clampDepth(depth) + 1);
+    return { oid, files: (await readPyFiles(d, oid)).files };
 }
 
 // Git sorts tree entries as if directory names had a trailing slash.
@@ -705,6 +801,8 @@ function makeMessageHandler(engine, auth, ui = {}) {
             status: () => engine.status(),
             pull: () => engine.pull(),
             commit: () => engine.commit({ files: msg.files, message: msg.message }),
+            history: () => engine.history({ depth: msg.depth }),
+            filesAt: () => engine.filesAt({ oid: msg.oid, depth: msg.depth }),
             authStart: () => auth.start(),
             authStatus: () => auth.status(),
             authCancel: () => auth.cancel(),
