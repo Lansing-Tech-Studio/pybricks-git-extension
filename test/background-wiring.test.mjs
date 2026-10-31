@@ -14,6 +14,11 @@ const fakeEngine = {
     status: async () => ({ ok: true, configured: true, branch: 'main', head: null }),
     pull: async () => ({ head: 'abc1234', files: [], pullWarning: '' }),
     commit: async (msg) => ({ committed: true, head: 'abc1234', message: msg.message, pushed: true, preserved: [] }),
+    history: async (opts) => ({ head: 'h', commits: [], hasMore: false, depth: opts.depth }),
+    filesAt: async (opts) => {
+        if (opts.oid === 'boom') throw new Error('object not found');
+        return { oid: opts.oid, files: [], depth: opts.depth };
+    },
 };
 
 const fakeAuth = {
@@ -28,6 +33,21 @@ test('routes status, pull, and commit ops to the engine', async () => {
     assert.equal((await call(handler, { op: 'status' })).configured, true);
     assert.equal((await call(handler, { op: 'pull' })).head, 'abc1234');
     assert.equal((await call(handler, { op: 'commit', files: [], message: 'm' })).message, 'm');
+});
+
+test('routes history and filesAt to the engine with their arguments', async () => {
+    const handler = makeMessageHandler(fakeEngine, fakeAuth);
+    assert.equal((await call(handler, { op: 'history', depth: 5 })).depth, 5);
+    const at = await call(handler, { op: 'filesAt', oid: 'abc', depth: 9 });
+    assert.equal(at.oid, 'abc');
+    assert.equal(at.depth, 9);
+});
+
+test('a failing filesAt comes back as {error, details} with the op named', async () => {
+    const handler = makeMessageHandler(fakeEngine, fakeAuth);
+    const res = await call(handler, { op: 'filesAt', oid: 'boom' });
+    assert.equal(res.error, 'object not found');
+    assert.equal(res.details.op, 'filesAt');
 });
 
 test('routes the four auth ops to the auth flow', async () => {

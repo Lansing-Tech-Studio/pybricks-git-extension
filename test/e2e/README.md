@@ -418,3 +418,54 @@ identical), `prog_differs.py` (one motor port changed → splices cleanly), and
 
 `splice-panel.png` (committed alongside this README) is the screenshot after the
 push, with the splice report shown in the reopened panel.
+
+# `drive-history.mjs` — phase-5 history-viewer round-trip
+
+The fourth self-contained driver, on the same mechanics as `drive-menu.mjs`
+(copied and annotated). It proves the **History panel** works end to end
+against the real UI, IndexedDB bridge and service worker, including the
+**two-click Restore** and the **no-reload** guarantee. No licence is needed:
+every seeded file is plain Python.
+
+## How to run
+
+```bash
+node test/e2e/drive-history.mjs
+```
+
+Exit code `0` = PASS, non-zero = FAIL. On success it writes `history-panel.png`
+(committed alongside this README); on failure it writes `history-failure.png`.
+
+## What it covers
+
+It seeds the bare repo with three commits — `seed` (`a.py`, a protected
+`coach.py` via `.pybricks-git.json`), `second` (`a.py` v2, `b.py` added) and
+`third` (`a.py` v3) — then:
+
+1. Writes settings via the SW, dismisses the Welcome Tour, and **Pull**s
+   (`↓ +3 ~0 -0`), asserting no reload.
+2. Clicks **History**: three `[data-pybricks-git-history-commit]` rows whose
+   subjects match `git log` newest-first, the first row is the branch tip, the
+   mode select defaults to `now`, the heading reads "Since <sha>, compared to
+   now", and `[data-pybricks-git-history-unchanged]` reports "3 unchanged
+   files" with no changed-file section.
+3. Edits `a.py` and `coach.py` in the editor via `upsert-files`, then clicks the
+   diff heading: the click-driven freshness check re-renders, `a.py` shows one
+   added line and a `[data-pybricks-git-history-restore="a.py"]` button, and
+   the protected `coach.py` section has **no** Restore button.
+4. Switches to "This commit's changes": the tip's diff of `a.py` is exactly
+   `del print("a v2")` / `add print("a v3")` and `b.py` is absent. **◀ Older**
+   shows `a.py:modified`, `b.py:added`; **◀ Older** again lands on "First
+   commit …, everything added" with the button disabled and no "Load older".
+5. **Newer ▶**, then the **Whole file** checkbox: `b.py` renders as one added
+   line with no hunk header, and `chrome.storage.local.historyPanel` persists
+   `wholeFile: true`.
+6. Back in "Compared to now" on the second commit, clicks **Restore this
+   version** on `a.py` once (button arms as "Replace current file?", the editor
+   copy is untouched) and again: status "Restored a.py", the editor's `a.py` is
+   the second commit's version, the page did not reload, `a.py` drops out of
+   the diff, and `coach.py` is untouched.
+7. **Commit**s with the message `restored a.py`: the label is `✓ <sha> ↑`, the
+   panel refreshes itself to four rows, and the harness-side `git log` shows the
+   new subject.
+8. Zero extension exceptions across page and service worker; screenshot.

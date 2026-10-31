@@ -12,6 +12,7 @@ It works equally well for block-based programs and Python programs — block fil
 
 - **Commit button** in the editor toolbar — prompts for a commit message (blank = auto-timestamped), then commits *and pushes* every file from the editor straight to your team's GitHub fork.
 - **Pull button** — fetches the fork and applies its files back into the editor: adds new files, updates changed ones, deletes removed ones. Monaco scroll/cursor state and file identities (UUIDs) are preserved on update.
+- **History button** — opens a panel listing the fork's commits with GitHub-style diffs of the programs. Compare any commit to what's in the editor now (uncommitted work included), or step through what each commit changed, and **restore** an older version of a file into the editor with one button. Block programs are diffed on their generated Python, with a "blocks changed" marker.
 - **Works on both program types** — Python and block programs round-trip identically; the extension treats the file body as opaque text.
 - **No local server, no install** — the extension does the Git work itself, entirely in the browser. It runs on anything that can sideload a Chrome extension, **including unmanaged (personal) Chromebooks** via Load-unpacked. Managed (school-district) Chromebooks block Load-unpacked, so those need the Web Store listing plus an admin force-install policy.
 
@@ -52,6 +53,7 @@ Until a Client ID is set, `GITHUB_CLIENT_ID` is empty: **Sign in with GitHub** s
 |---|---|
 | Click **Commit** | Opens a message input under the button — **Enter** commits (blank message = timestamped default), **Escape** cancels. The extension fetches the fork's head, builds a commit from the editor's files, and pushes it. Button shows `✓ <short-sha> ↑` (committed and pushed), `no changes`, `setup needed` (extension not configured yet), or `error` (see the console). |
 | Click **Pull** | The extension fetches the fork and applies its files into the editor. Button shows `↓ +N ~N -N` (added / changed / deleted), or `nothing to pull` when the fork has no commits on the configured branch yet (nothing is applied in that case). The editor updates in place without reloading the page, so the hub stays connected. (Only if the extension can't drive the editor does it fall back to reloading the page.) |
+| Click **History** | Opens the History panel: the fork's commits on the left, a diff on the right. **Compared to now** (the default) shows what differs between the selected commit and the editor's current files; **This commit's changes** shows what that commit changed. **◀ Older** / **Newer ▶** step through commits, **Whole file** shows full files instead of hunks, **Load older** fetches more. Each changed file has **Restore this version**, which writes the selected commit's copy into the editor after a confirming second click (never for coach-protected files). Restoring doesn't commit — press **Commit** afterwards if you want to keep it. |
 
 ## Shared-code updates
 
