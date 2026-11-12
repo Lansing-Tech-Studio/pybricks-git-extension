@@ -469,3 +469,49 @@ It seeds the bare repo with three commits — `seed` (`a.py`, a protected
    panel refreshes itself to four rows, and the harness-side `git log` shows the
    new subject.
 8. Zero extension exceptions across page and service worker; screenshot.
+
+# `drive-pictures.mjs` — block-program pictures on Commit
+
+`drive-pictures.mjs` is a self-contained sibling of `drive-splice.mjs` (same
+Chromium launch, CDP client and git harness, copied and annotated). It proves
+that Commit takes Pybricks' own picture of each block program and commits it
+next to the program, against the real block editor.
+
+## How to run
+
+```bash
+PYBRICKS_LICENSE=<the pybricks.license record> node test/e2e/drive-pictures.mjs
+```
+
+Exit code `0` = PASS, non-zero = FAIL. A licensed success writes
+`pictures-sample.png` (the committed picture of `prog_a.py`, committed alongside
+this README); a failure writes `pictures-failure.png`.
+
+`PYBRICKS_LICENSE` is the JSON value of `localStorage['pybricks.license']` from
+a licensed browser profile (see `blocks-screenshot-dom.md`). The driver seeds it
+once the app's origin has loaded, then reloads so the app reads it.
+
+**Without `PYBRICKS_LICENSE`** the run still passes, asserting only that the
+picture pass is inert: a changed block program commits with no PNG, no tab is
+opened, and no "Enable block coding" dialog is raised.
+
+## What it covers
+
+It seeds the bare repo with two block programs (`prog_a.py`, `prog_b.py`), a
+protected block program (`coach.py`), a text program and no pictures, then:
+
+1. **Pull**s (`↓ +4 ~0 -0`), asserting no reload and no open tab.
+2. Asserts the extension sees the licence and that `imagesNeeded` names exactly
+   the two unprotected block programs.
+3. **Commit**s with no edits: `prog_a.png` and `prog_b.png` land in the repo as
+   real PNGs of the blocks (IHDR larger than 100×100); `coach.png` and
+   `text.png` do not; no dialog; the tabs opened for the pictures are closed
+   again; no reload; and each program was pushed exactly as the editor holds it
+   after its picture was taken (the re-read after the capture).
+4. **Commit**s again: `no changes`, nothing pushed.
+5. Replaces `prog_a.py` through the app and **Commit**s: `prog_a.png` is
+   retaken, `prog_b.png` is byte-identical.
+6. Deletes `prog_b.py` through the app and **Commit**s: `prog_b.py` and
+   `prog_b.png` are both gone, `prog_a.png` stays.
+7. **Pull**s: the editor holds only `.py` files.
+8. Nothing landed in the download folder; zero extension exceptions.

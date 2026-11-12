@@ -40,6 +40,10 @@ _Avoid_: Revert, roll back, checkout
 A `.py` file whose first line carries the Blockly workspace as JSON, followed by the Python generated from it. Diffs show the Python body and flag the blocks as changed when the workspace differs.
 _Avoid_: Blocks file, block file
 
+**Picture**:
+The PNG of a block program's blocks that Commit saves next to it in the repository (`mission_01.png` beside `mission_01.py`). It always matches the program it sits beside, or is absent. It never appears in the editor.
+_Avoid_: Screenshot, image, thumbnail
+
 **Base**:
 The state of each file that the editor and the repository last agreed on, recorded after a Pull or Commit. Tells a locally edited file from one changed upstream.
 _Avoid_: Last pull, snapshot

@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { IDBFactory } from 'fake-indexeddb';
 import { loadInject } from './load-inject.mjs';
 
-const { applyFiles, upsertFiles, sha256, findAppStore, planLiveWrites, writeFilesLive } = loadInject();
+const { applyFiles, upsertFiles, sha256, findAppStore, planLiveWrites, writeFilesLive, captureBlockImages } = loadInject();
 
 // Reference SHA-256 hex, computed independently of the code under test.
 const hexSha = (s) => createHash('sha256').update(s, 'utf8').digest('hex');
@@ -697,5 +697,127 @@ describe('writeFilesLive', () => {
     test('reports live:false without touching IndexedDB when no store is found', async () => {
         const res = await writeFilesLive({ files: [{ path: 'a.py', contents: 'a' }], rootEl: {} });
         assert.deepEqual(res, { live: false, reason: 'Pybricks app store not found' });
+    });
+});
+
+// --- captureBlockImages: tab choreography around the camera control ---
+
+describe('captureBlockImages', () => {
+    const BLOCKS = '# pybricks blocks file:{"blocks":{}}\n';
+
+    async function seededDb() {
+        const db = await openPybricks();
+        await seed(db, [
+            { path: 'a.py', contents: BLOCKS, uuid: 'u-a' },
+            { path: 'b.py', contents: BLOCKS, uuid: 'u-b' },
+            { path: 'c.py', contents: BLOCKS, uuid: 'u-c' },
+            { path: 'text.py', contents: 'print(1)\n', uuid: 'u-text' },
+        ]);
+        return db;
+    }
+
+    // A fake page: `shots` maps the active uuid to what the camera yields.
+    function fakeDom(store, shots) {
+        const calls = [];
+        return {
+            calls,
+            panel: () => `panel-of-${store.editor.activeFileUuid}`,
+            snap: async ({ stalePanel }) => {
+                const uuid = store.editor.activeFileUuid;
+                calls.push({ uuid, stalePanel });
+                const shot = shots[uuid];
+                if (shot instanceof Error) throw shot;
+                return shot ?? { dataUrl: `data:image/png;base64,${uuid}` };
+            },
+        };
+    }
+
+    test('pictures each program, closes only the tabs it opened, and restores the active tab', async () => {
+        const db = await seededDb();
+        const store = fakeStore({ openFileUuids: ['u-text', 'u-b'], activeFileUuid: 'u-text', db });
+        const dom = fakeDom(store, {});
+        const res = await captureBlockImages({ paths: ['a.py', 'b.py'], rootEl: fakeRoot(store), dom, timeoutMs: 1000 });
+        assert.deepEqual(res, {
+            images: [
+                { path: 'a.py', dataUrl: 'data:image/png;base64,u-a' },
+                { path: 'b.py', dataUrl: 'data:image/png;base64,u-b' },
+            ],
+            skipped: [],
+        });
+        assert.deepEqual(store.editor.openFileUuids, ['u-text', 'u-b'], 'a.py was opened for its picture and closed again');
+        assert.equal(store.editor.activeFileUuid, 'u-text');
+        // Each snap is told which editor element belonged to the previous file.
+        assert.deepEqual(dom.calls, [
+            { uuid: 'u-a', stalePanel: 'panel-of-u-text' },
+            { uuid: 'u-b', stalePanel: 'panel-of-u-a' },
+        ]);
+    });
+
+    test('a program that is already the active tab is pictured in place', async () => {
+        const db = await seededDb();
+        const store = fakeStore({ openFileUuids: ['u-a'], activeFileUuid: 'u-a', db });
+        const dom = fakeDom(store, {});
+        const res = await captureBlockImages({ paths: ['a.py'], rootEl: fakeRoot(store), dom, timeoutMs: 1000 });
+        assert.equal(res.images.length, 1);
+        assert.deepEqual(dom.calls, [{ uuid: 'u-a', stalePanel: null }]);
+        assert.deepEqual(store.dispatched, [], 'nothing to open, close, or refocus');
+    });
+
+    test('stops at the first program whose block editor never opens', async () => {
+        const db = await seededDb();
+        const store = fakeStore({ openFileUuids: [], activeFileUuid: null, db });
+        const dom = fakeDom(store, { 'u-a': { error: 'the block editor did not open', noEditor: true } });
+        const res = await captureBlockImages({ paths: ['a.py', 'b.py', 'c.py'], rootEl: fakeRoot(store), dom, timeoutMs: 1000 });
+        assert.deepEqual(res.images, []);
+        assert.deepEqual(res.skipped, [
+            { path: 'a.py', reason: 'the block editor did not open' },
+            { path: 'b.py', reason: 'the block editor did not open' },
+            { path: 'c.py', reason: 'the block editor did not open' },
+        ]);
+        assert.deepEqual(dom.calls.map((c) => c.uuid), ['u-a'], 'b.py and c.py were never opened');
+        assert.deepEqual(store.editor.openFileUuids, []);
+    });
+
+    test('one program failing to produce a picture does not stop the rest', async () => {
+        const db = await seededDb();
+        const store = fakeStore({ openFileUuids: [], activeFileUuid: null, db });
+        const dom = fakeDom(store, { 'u-a': { error: 'Pybricks did not produce a picture in time' } });
+        const res = await captureBlockImages({ paths: ['a.py', 'ghost.py', 'b.py'], rootEl: fakeRoot(store), dom, timeoutMs: 1000 });
+        assert.deepEqual(res.images.map((i) => i.path), ['b.py']);
+        assert.deepEqual(res.skipped, [
+            { path: 'a.py', reason: 'Pybricks did not produce a picture in time' },
+            { path: 'ghost.py', reason: 'file not found' },
+        ]);
+    });
+
+    test('a throw mid-pass is reported, keeps the pictures taken so far, and still restores the tabs', async () => {
+        const db = await seededDb();
+        const store = fakeStore({ openFileUuids: ['u-text'], activeFileUuid: 'u-text', db });
+        const dom = fakeDom(store, { 'u-b': new Error('canvas exploded') });
+        const res = await captureBlockImages({ paths: ['a.py', 'b.py', 'c.py'], rootEl: fakeRoot(store), dom, timeoutMs: 1000 });
+        assert.deepEqual(res.images.map((i) => i.path), ['a.py']);
+        assert.deepEqual(res.skipped.map((s) => s.path), ['b.py', 'c.py']);
+        assert.match(res.skipped[0].reason, /could not take the pictures: canvas exploded/);
+        assert.deepEqual(store.editor.openFileUuids, ['u-text']);
+        assert.equal(store.editor.activeFileUuid, 'u-text');
+    });
+
+    test('a program Pybricks never activates ends the pass', async () => {
+        await seededDb();
+        const store = fakeStore(); // swallows activateFile, as a renamed action would
+        const dom = fakeDom(store, {});
+        const res = await captureBlockImages({ paths: ['a.py', 'b.py'], rootEl: fakeRoot(store), dom, timeoutMs: 200 });
+        assert.deepEqual(res.images, []);
+        assert.deepEqual(res.skipped.map((s) => s.path), ['a.py', 'b.py']);
+        assert.equal(dom.calls.length, 0);
+    });
+
+    test('resolves with everything skipped when there is no store or no database', async () => {
+        const noStore = await captureBlockImages({ paths: ['a.py'], rootEl: {} });
+        assert.deepEqual(noStore, { images: [], skipped: [{ path: 'a.py', reason: 'Pybricks app store not found' }] });
+        // Fresh IDBFactory from beforeEach: no Pybricks database.
+        const noDb = await captureBlockImages({ paths: ['a.py'], rootEl: fakeRoot(fakeStore()) });
+        assert.deepEqual(noDb.images, []);
+        assert.match(noDb.skipped[0].reason, /no Pybricks IndexedDB found/);
     });
 });

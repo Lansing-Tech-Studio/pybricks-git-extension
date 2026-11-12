@@ -37,7 +37,8 @@ Everything runs in the browser; the only external party is `github.com`:
 | Op | Request | Success response |
 |---|---|---|
 | `status` | — | `{ok, configured, branch, head: null}` |
-| `commit` | `{files, message}` | `{committed, head, message, pushed, preserved, protectedSkipped, deleteSkipped}` |
+| `commit` | `{files, message, images?}` | `{committed, head, message, pushed, preserved, protectedSkipped, deleteSkipped, images}` (`images` in: `[{path, base64}]` keyed by the program's `.py` path; out: the `.png` paths written. See "Block-program pictures") |
+| `imagesNeeded` | `{files}` | `{paths}` — the block programs Commit wants a picture of |
 | `pull` | — | `{head, files, pullWarning, protected, shas}` |
 | `history` | `{depth?}` | `{head, commits: [{oid, parent, parents, message, author: {name, timestamp}}], hasMore}` (`head: null`, no commits for an empty branch; see "History viewer") |
 | `filesAt` | `{oid, depth?}` | `{oid, files: [{path, contents}]}` — the same non-internal `.py` set Pull applies, at that commit |
@@ -103,6 +104,7 @@ The ISOLATED scripts reach IndexedDB by `window.postMessage`-ing `inject.js` (`p
 | `apply-files` | `{files}` | `{added, changed, deleted, unchanged}` | full-sync: adds/updates listed paths **and DELETES any IDB path not in `files`**. Used by Pull. **Never reuse for single-file writes.** |
 | `upsert-files` | `{files}` | `{added, changed, deleted, unchanged}` | partial write: updates/inserts only the listed paths, **never deletes** (`deleted` is always 0). Used by new-program, Update-robot-setup, and as the menu Save's fallback. |
 | `write-files-live` | `{files, deleteUnlisted?}` | `{live: true, dispatched, summary, tabsNotReopened?, activeNotRestored?}` or `{live: false, reason}` | writes (and, with `deleteUnlisted`, deletes like `apply-files`) through the app's Redux store, so the running UI and open editor tabs see it with **no reload**; confirmed by IDB read-back. Used by Pull, menu Save, New program and Update robot setup. See "The dexie-observable gotcha". |
+| `capture-block-images` | `{paths}` | `{images: [{path, dataUrl}], skipped: [{path, reason}]}` | shows each block program in the block editor, clicks Pybricks' camera control and keeps the PNG instead of letting it download. Never rejects. Used by Commit. See "Block-program pictures". |
 
 `apply-files` and `upsert-files` are the same `writeFiles(files, deleteUnlisted)` with the delete pass toggled; both preserve each existing metadata row's `viewState`/`uuid` and only touch `sha256`/`contents`.
 
@@ -180,6 +182,26 @@ A **History** toolbar button opens a floating panel that lists the branch's comm
 - **Restore** always writes the **selected commit's** version of one file (the "after" side in commit mode, the "before" side in now mode) through the same `write-files-live` → `upsert-files` + reload contract as menu Save. It recreates a locally deleted file, **never deletes, never commits**, and is **not offered** for protected paths (`lastPullManifest.protected`, shown as a 🔒 badge instead) or for files absent from the selected commit. Two clicks: the first arms the button as "Replace current file?" for five seconds. After a live restore `afterRestore()` (content.js) refreshes the menu panel and file-list watcher, since the file may be `menu_config.py`. A restored block program open in a tab goes through the close/write/reopen path, licence dialog and all.
 - **Tests.** `test/diff.test.mjs` (via `test/load-diff.mjs`), `test/background-history.test.mjs` (order, parent links, depth/`hasMore`, empty branch, `filesAt` incl. a deleted file and hidden paths, a wiped gitdir, a depth-1 Pull between two History calls, a real merge commit, the depth + 1 fetch), wiring tests for both ops, and the committed E2E `test/e2e/drive-history.mjs` (Pull → History → live-edit pickup → commit mode → Older/Newer → whole-file → two-click Restore with no reload and no button on the protected file → Commit grows the list).
 
+## Block-program pictures
+
+On GitHub a block program is one unreadable line of JSON, so Commit also commits a picture of the blocks: `mission_01.py` gets `mission_01.png` beside it. The picture is the PNG Pybricks' own camera control exports (2× scale, transparent background). Design: `docs/superpowers/specs/2026-11-12-block-pictures-design.md`; the page DOM it relies on: `test/e2e/blocks-screenshot-dom.md`.
+
+- **The invariant: a picture in the repo always matches its program, or is absent.** The engine decides against the freshly fetched tip (`pictureState()` in `background.js`), for each non-protected block program in the payload:
+
+  | State | `imagesNeeded` | Commit, picture supplied | Commit, none supplied |
+  |---|---|---|---|
+  | **changed** (this Commit writes a new version) | yes | write the PNG | **delete** the PNG |
+  | **same** (the tip already holds exactly this) | only if the PNG is missing | write it if missing | leave alone |
+  | **stale** (untouched since Pull, the tip moved on) | no | ignore it | leave alone |
+
+  Deleting the PNG of a changed program that arrives without a picture is what lets the "missing" rule repair it later: an unlicensed teammate's Commit, a failed capture and the Update-robot-setup snapshot commit all take that path. **Never "fix" that into keeping the old PNG** — it would show blocks the program no longer has.
+- **Protected programs get no picture**, and deleting a block program deletes its PNG in the same delete pass (a PNG beside a *text* program is somebody's own file and stays). Pictures supplied for anything else (text programs, unknown paths, bad base64) are dropped: they come from the page, and a bad picture must not fail a Commit.
+- **Pictures never reach the editor.** Pull, History and `lastPullShas` only see `.py` files (`readPyFiles`), so nothing has to hide them. Pinned by a test.
+- **Commit flow** (`content.js:takeBlockPictures`): `list-files` → `imagesNeeded` → `capture-block-images` → **`list-files` again** → `commit {files, message, images}`. The second read is load-bearing: opening a block program makes Pybricks regenerate and re-save it, and a picture must be committed with the contents it was taken from. The whole pass is wrapped so that any failure commits without pictures.
+- **Gate: a valid `pybricks.license` in localStorage** (`blockCodingEnabled()`, mirroring Pybricks' own check). Without one, opening a block program raises the "Enable block coding" dialog, so the pass must not run at all. It is also skipped, with no extra fetch, when the editor holds no block program.
+- **Capture** (`inject.js:captureBlockImages`): Pybricks keeps **one** block editor, remounted per active file, so each program is activated in turn (`editor.action.activateFile`), the op waits for a *new* `.pb-editor-blocks-panel` element with no loading overlay and a settled block canvas, clicks the camera control, and takes the `data:image/png` URL out of a temporarily patched `HTMLAnchorElement.prototype.click`. Tabs it opened are closed again and focus is restored. **The camera is found by its icon, never by position** — its neighbors (zoom-to-fit, align-blocks) rewrite the program when clicked. If Pybricks redraws the icon, no camera is found and Commit simply stops taking pictures; update `CAMERA_ICON_MARKER` from `blocks-screenshot-dom.md`.
+- **Tests.** `test/background-images.test.mjs` (every row of the table, byte-exact PNG round-trip, deletes, a rejected-push rebuild, Pull/`filesAt` never returning a PNG), the `captureBlockImages` block in `test/inject.test.mjs` (tab choreography with a fake store and fake DOM), a wiring test, and the committed E2E `test/e2e/drive-pictures.mjs` (needs `PYBRICKS_LICENSE` for the real capture; without it, it asserts the pass is inert).
+
 ## Commands
 
 ```bash
@@ -239,6 +261,7 @@ Design: `docs/superpowers/specs/2026-07-25-release-automation-design.md`.
 - `test/load-background.mjs` loads `src/background.js` *unmodified* — it reads the file and evaluates it in a `Function` scope that publishes `makeEngine` / `makeMessageHandler` / `makeAuthFlow` onto `globalThis`. The service-worker wiring block is skipped because `importScripts` is undefined in Node. Same rule as `inject.js`: **don't add ESM `export`s** to `background.js`; that would break it as a classic service worker.
 - `test/load-inject.mjs` does the equivalent for `src/inject.js` (appends a line publishing its internal functions), run against `fake-indexeddb`.
 - `test/load-diff.mjs` is the same shim for `src/diff.js` (phase 5).
+- `test/background-images.test.mjs` covers the block-program picture rules (see "Block-program pictures").
 - `test/pack.test.mjs` covers `scripts/pack.mjs` (the Web Store zip). It validates the output with the real **`unzip` binary** — a second external-tool requirement alongside git.
 - `test/menu-config.test.mjs`'s `bundle hints (real python3)` block needs the real **`python3` binary** — a third external-tool requirement. It compiles the generated `menu_config.py` with `ast`, checks that importing it runs none of the hinted modules, and runs `modulefinder.ModuleFinder` over a stand-in `main.py` to prove the slot modules actually resolve. Faking the compiler would defeat the point: the whole bug is that a constant-folded guard *looks* right and emits no import.
 - The `test` script globs `test/*.test.mjs` specifically so the `load-*.mjs` and other helpers aren't picked up as (empty) test files.

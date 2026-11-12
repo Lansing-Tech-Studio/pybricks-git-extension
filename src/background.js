@@ -14,6 +14,7 @@ function makeEngine(deps) {
         status: () => statusOp(d),
         pull: () => pullOp(d),
         commit: (msg) => commitOp(d, msg ?? {}),
+        imagesNeeded: (msg) => imagesNeededOp(d, msg ?? {}),
         history: (opts) => historyOp(d, opts ?? {}),
         filesAt: (opts) => filesAtOp(d, opts ?? {}),
         errorContext: () => errorContextOp(d),
@@ -330,12 +331,71 @@ async function writeTreeFromMap(d, fileMap) {
 
 // sha256 of a tree entry's contents, in the same hex form as lastPullShas.
 async function entrySha(d, entry) {
+    return sha256Hex(await entryText(d, entry));
+}
+
+async function entryText(d, entry) {
     const { blob } = await d.git.readBlob({ fs: d.fs, gitdir: d.gitdir, oid: entry.oid });
-    return sha256Hex(new TextDecoder().decode(blob));
+    return new TextDecoder().decode(blob);
+}
+
+// --- Block-program pictures ---------------------------------------------------
+// A block program `foo.py` may have a picture of its blocks at `foo.png`. The
+// rule Commit keeps: a picture in the repo always matches its program, or is
+// absent. Design: docs/superpowers/specs/2026-11-12-block-pictures-design.md.
+
+const BLOCKS_SENTINEL = '# pybricks blocks file:';
+
+const pngPathFor = (path) => path.replace(/\.py$/, '.png');
+
+// How a payload file stands against the fetched tree, for the picture rules:
+//   null       not a program that gets a picture (text, protected, not .py)
+//   'changed'  this Commit will write a new version of it
+//   'same'     the tree already holds exactly this
+//   'stale'    untouched since the last Pull while the tree moved on; Commit
+//              keeps the tree's version, so the editor's blocks aren't the repo's
+async function pictureState(d, f, fileSha, { head, existing, pullShas, protectedPaths }) {
+    if (typeof f.contents !== 'string' || !f.path.endsWith('.py') || !f.contents.startsWith(BLOCKS_SENTINEL)) return null;
+    if (protectedPaths.has(f.path) || protectedPaths.has(pngPathFor(f.path))) return null;
+    const entry = existing.get(f.path);
+    if (entry && (await entryText(d, entry)) === f.contents) return 'same';
+    return head && pullShas && pullShas[f.path] === fileSha ? 'stale' : 'changed';
+}
+
+// Which of the editor's block programs Commit wants a picture for: the changed
+// ones, and the unchanged ones the repo has no picture of yet.
+async function imagesNeededOp(d, msg) {
+    const files = msg.files ?? [];
+    const s = await getSettings(d);
+    requireConfigured(s);
+    const pullShas = await d.storage.get('lastPullShas');
+    const head = await fetchRemoteHead(d, s);
+    const existing = await listAllFiles(d, head);
+    const ctx = { head, existing, pullShas, protectedPaths: await readProtectedPaths(d, existing) };
+    const paths = [];
+    for (const f of files) {
+        const state = await pictureState(d, f, await sha256Hex(f.contents), ctx);
+        if (state === 'changed' || (state === 'same' && !existing.has(pngPathFor(f.path)))) paths.push(f.path);
+    }
+    return { paths };
+}
+
+// The pictures a Commit was handed, as {programPath: bytes}. They come from the
+// page, so anything malformed is dropped: a bad picture must not fail a Commit.
+function decodeImages(images) {
+    const out = new Map();
+    for (const img of Array.isArray(images) ? images : []) {
+        if (!img || typeof img.path !== 'string' || typeof img.base64 !== 'string') continue;
+        try {
+            out.set(img.path, Uint8Array.from(atob(img.base64), (c) => c.charCodeAt(0)));
+        } catch {}
+    }
+    return out;
 }
 
 async function commitOp(d, msg) {
     const files = msg.files ?? [];
+    const images = decodeImages(msg.images);
     const s = await getSettings(d);
     requireConfigured(s);
     // lastPullShas replaced lastPullPaths; fall back for installs that haven't
@@ -348,7 +408,7 @@ async function commitOp(d, msg) {
     for (let attempt = 0; attempt < 3; attempt++) {
         const head = await fetchRemoteHead(d, s);
         if (!head && files.length === 0) {
-            return { committed: false, head: '', message: 'no changes', pushed: false, preserved: [], protectedSkipped: [], deleteSkipped: [] };
+            return { committed: false, head: '', message: 'no changes', pushed: false, preserved: [], protectedSkipped: [], deleteSkipped: [], images: [] };
         }
         const existing = await listAllFiles(d, head);
         const protectedPaths = await readProtectedPaths(d, existing);
@@ -356,6 +416,7 @@ async function commitOp(d, msg) {
         const preserved = [];
         const protectedSkipped = [];
         const deleteSkipped = [];
+        const imagesWritten = [];
         // Base-sha updates for this attempt only (reset on PushRejectedError
         // retry, applied to storage only after this attempt's push succeeds).
         // null means "delete this path's entry".
@@ -380,13 +441,32 @@ async function commitOp(d, msg) {
                 else if (pullShas?.[path] && (await entrySha(d, existing.get(path))) !== pullShas[path]) {
                     deleteSkipped.push(path);
                 } else {
+                    // A block program takes its picture with it. A png beside a
+                    // text program is somebody's own file and stays.
+                    if ((await entryText(d, existing.get(path))).startsWith(BLOCKS_SENTINEL)) {
+                        next.delete(pngPathFor(path));
+                    }
                     next.delete(path);
                     shaUpdates.set(path, null);
                 }
             } else preserved.push(path);
         }
+        const pictureCtx = { head, existing, pullShas, protectedPaths };
         for (const f of files) {
             const fileSha = await sha256Hex(f.contents);
+            // Pictures first: the 'same' backfill applies to files the guard
+            // below skips. A changed program with no picture loses its old one,
+            // so the repo never shows blocks the program no longer has.
+            const state = await pictureState(d, f, fileSha, pictureCtx);
+            const png = pngPathFor(f.path);
+            const bytes = images.get(f.path);
+            if (bytes && (state === 'changed' || (state === 'same' && !existing.has(png)))) {
+                const oid = await d.git.writeBlob({ fs: d.fs, gitdir: d.gitdir, blob: bytes });
+                next.set(png, { oid, mode: '100644' });
+                imagesWritten.push(png);
+            } else if (state === 'changed') {
+                next.delete(png);
+            }
             // Skip files unchanged since the last Pull: `next` starts as a copy of the
             // fetched tree, so skipping keeps a teammate's newer push (or deletion)
             // instead of reverting it with our stale copy. Requires `head` — with no
@@ -423,7 +503,7 @@ async function commitOp(d, msg) {
             ? (await d.git.readCommit({ fs: d.fs, gitdir: d.gitdir, oid: head })).commit.tree
             : null;
         if (newTree === oldTree) {
-            return { committed: false, head: head.slice(0, 7), message: 'no changes', pushed: false, preserved, protectedSkipped, deleteSkipped };
+            return { committed: false, head: head.slice(0, 7), message: 'no changes', pushed: false, preserved, protectedSkipped, deleteSkipped, images: [] };
         }
         const message = (msg.message ?? '').trim() || `Update from Pybricks at ${new Date(d.now()).toISOString()}`;
         const author = {
@@ -466,7 +546,7 @@ async function commitOp(d, msg) {
                 }
                 await d.storage.set({ lastPullShas: merged });
             }
-            return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved, protectedSkipped, deleteSkipped };
+            return { committed: true, head: commitOid.slice(0, 7), message, pushed: true, preserved, protectedSkipped, deleteSkipped, images: imagesWritten };
         } catch (err) {
             if (err && err.code === 'PushRejectedError') {
                 lastErr = err; // someone else pushed between our fetch and push — rebuild on the new head
@@ -800,7 +880,8 @@ function makeMessageHandler(engine, auth, ui = {}) {
         const ops = {
             status: () => engine.status(),
             pull: () => engine.pull(),
-            commit: () => engine.commit({ files: msg.files, message: msg.message }),
+            commit: () => engine.commit({ files: msg.files, message: msg.message, images: msg.images }),
+            imagesNeeded: () => engine.imagesNeeded({ files: msg.files }),
             history: () => engine.history({ depth: msg.depth }),
             filesAt: () => engine.filesAt({ oid: msg.oid, depth: msg.depth }),
             authStart: () => auth.start(),
