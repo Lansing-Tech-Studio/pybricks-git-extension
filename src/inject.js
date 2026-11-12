@@ -33,6 +33,8 @@ async function handle(op, payload) {
             return await upsertFiles(payload);
         case 'write-files-live':
             return await writeFilesLive(payload);
+        case 'capture-block-images':
+            return await captureBlockImages(payload);
         default:
             throw new Error(`unknown op: ${op}`);
     }
@@ -384,16 +386,154 @@ async function reopenTabs(store, uuids, activeUuid, timeoutMs) {
         );
         if (!reopened) missing.push(uuid);
     }
-    const { editor } = store.getState();
-    let activeRestored = true;
-    if (uuids.length && activeUuid && editor.openFileUuids.includes(activeUuid) && editor.activeFileUuid !== activeUuid) {
-        store.dispatch({ type: 'editor.action.activateFile', uuid: activeUuid });
-        activeRestored = await waitUntil(
-            () => store.getState().editor.activeFileUuid === activeUuid,
-            Date.now() + timeoutMs,
-        );
-    }
+    const activeRestored = uuids.length ? await restoreActiveTab(store, activeUuid, timeoutMs) : true;
     return { missing, activeRestored };
+}
+
+// Makes `activeUuid` the active tab again if it is still open. Resolves false
+// only when Pybricks didn't switch in time.
+async function restoreActiveTab(store, activeUuid, timeoutMs) {
+    const { editor } = store.getState();
+    if (!activeUuid || !editor.openFileUuids.includes(activeUuid) || editor.activeFileUuid === activeUuid) return true;
+    store.dispatch({ type: 'editor.action.activateFile', uuid: activeUuid });
+    return waitUntil(() => store.getState().editor.activeFileUuid === activeUuid, Date.now() + timeoutMs);
+}
+
+// --- Block-program pictures ---
+//
+// Pybricks' block editor has a camera control that downloads the canvas as a
+// PNG. capture-block-images shows each program in turn, clicks that control,
+// and keeps the PNG instead of letting it download. The DOM it relies on is
+// recorded in test/e2e/blocks-screenshot-dom.md.
+
+const CAPTURE_TIMEOUT_MS = 8000;
+
+// A fragment of the camera icon's SVG path. The control is found by its icon,
+// never by position: its neighbors (zoom-to-fit, align-blocks) rewrite the
+// program when clicked.
+const CAMERA_ICON_MARKER = 'm15.277 4.0198';
+
+function findCameraControl(panel) {
+    for (const img of panel.querySelectorAll('image')) {
+        const href = img.getAttribute('xlink:href') || img.getAttribute('href') || '';
+        const b64 = href.split(';base64,')[1];
+        try {
+            if (b64 && atob(b64).includes(CAMERA_ICON_MARKER)) return img;
+        } catch {}
+    }
+    return null;
+}
+
+// The page side of a capture, kept apart so the tab choreography can be tested
+// without a DOM.
+const blockEditorDom = {
+    // Pybricks keeps one block editor, remounted (a new element) per active file.
+    panel: () => document.querySelector('.pb-editor-blocks-panel'),
+
+    // Resolves {dataUrl} or {error, noEditor?}. `stalePanel` is the editor
+    // element of the previously active file, which must be gone first.
+    async snap({ stalePanel, timeoutMs }) {
+        let camera = null;
+        let lastBox = '';
+        const ready = await waitUntil(() => {
+            const panel = this.panel();
+            if (!panel || panel === stalePanel || panel.querySelector('.pb-editor-blocks-panel__overlay')) return false;
+            camera = findCameraControl(panel);
+            const canvas = panel.querySelector('svg.blocklySvg .blocklyBlockCanvas');
+            if (!camera || !canvas) return false;
+            // Blocks render a frame or two after the editor mounts; an early
+            // click would picture an empty canvas.
+            const b = canvas.getBBox();
+            const box = [b.x, b.y, b.width, b.height].join();
+            const settled = box === lastBox;
+            lastBox = box;
+            return settled;
+        }, Date.now() + timeoutMs);
+        if (!ready) return { error: 'the block editor did not open', noEditor: true };
+
+        const proto = HTMLAnchorElement.prototype;
+        const originalClick = proto.click;
+        try {
+            const dataUrl = await new Promise((resolve) => {
+                const timer = setTimeout(() => resolve(null), timeoutMs);
+                proto.click = function (...args) {
+                    if (this.download.endsWith('.png') && this.href.startsWith('data:image/png')) {
+                        clearTimeout(timer);
+                        resolve(this.href);
+                    } else {
+                        originalClick.apply(this, args);
+                    }
+                };
+                camera.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+            });
+            return dataUrl ? { dataUrl } : { error: 'Pybricks did not produce a picture in time' };
+        } finally {
+            proto.click = originalClick;
+        }
+    },
+};
+
+// Takes a picture of each block program in `paths`. Resolves
+// {images: [{path, dataUrl}], skipped: [{path, reason}]} and never rejects.
+// Tabs it had to open are closed again and the active tab is restored.
+async function captureBlockImages({ paths = [], timeoutMs = CAPTURE_TIMEOUT_MS, rootEl, dom = blockEditorDom } = {}) {
+    const images = [];
+    const skipped = [];
+    const store = findAppStore(rootEl);
+    let failure = store ? null : 'Pybricks app store not found';
+    let before = null;
+    try {
+        if (store) {
+            const { metadata } = await readStores();
+            const uuidByPath = new Map(metadata.map((m) => [m.path, m.uuid]));
+            const { openFileUuids, activeFileUuid } = store.getState().editor;
+            before = { open: new Set(openFileUuids), active: activeFileUuid };
+            for (const path of paths) {
+                const uuid = uuidByPath.get(path);
+                if (!uuid) {
+                    skipped.push({ path, reason: 'file not found' });
+                    continue;
+                }
+                const wasActive = store.getState().editor.activeFileUuid === uuid;
+                const stalePanel = wasActive ? null : dom.panel();
+                if (!wasActive) store.dispatch({ type: 'editor.action.activateFile', uuid });
+                const active = await waitUntil(
+                    () => store.getState().editor.activeFileUuid === uuid,
+                    Date.now() + timeoutMs,
+                );
+                const shot = active
+                    ? await dom.snap({ stalePanel, timeoutMs })
+                    : { error: 'Pybricks did not open the program in time', noEditor: true };
+                if (shot.dataUrl) {
+                    images.push({ path, dataUrl: shot.dataUrl });
+                    continue;
+                }
+                skipped.push({ path, reason: shot.error });
+                // One attempt is enough to learn the block editor isn't
+                // available; trying every program would just flip tabs.
+                if (shot.noEditor) {
+                    failure = shot.error;
+                    break;
+                }
+            }
+        }
+    } catch (err) {
+        failure = `Pybricks could not take the pictures: ${err && err.message ? err.message : err}`;
+    } finally {
+        if (before) await restoreTabs(store, before, timeoutMs).catch(() => {});
+    }
+    const done = new Set([...images, ...skipped].map((r) => r.path));
+    for (const path of paths) if (!done.has(path)) skipped.push({ path, reason: failure });
+    return { images, skipped };
+}
+
+// Closes the tabs opened since `before` was recorded, then restores focus.
+async function restoreTabs(store, before, timeoutMs) {
+    const openNow = () => store.getState().editor.openFileUuids;
+    const opened = openNow().filter((u) => !before.open.has(u));
+    for (const uuid of opened) store.dispatch({ type: 'editor.action.closeFile', uuid });
+    await waitUntil(() => opened.every((u) => !openNow().includes(u)), Date.now() + timeoutMs);
+    await restoreActiveTab(store, before.active, timeoutMs);
 }
 
 async function readStores() {

@@ -43,7 +43,9 @@ The extension communicates only with GitHub (`github.com` and
 
 - **Your program files**, when you press Commit — they are pushed to the
   GitHub repository you configured, and are visible there under that
-  repository's own visibility settings (public or private)
+  repository's own visibility settings (public or private). For block
+  programs this includes a picture of the blocks, saved as a PNG next to the
+  program
 - **Your access token**, sent to GitHub to authenticate those Git operations
 - **Sign-in requests**, when you use Sign in with GitHub (GitHub's standard
   Device Flow), and one request to look up your GitHub username afterward

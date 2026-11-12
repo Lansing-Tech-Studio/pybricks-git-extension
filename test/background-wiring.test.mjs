@@ -35,6 +35,23 @@ test('routes status, pull, and commit ops to the engine', async () => {
     assert.equal((await call(handler, { op: 'commit', files: [], message: 'm' })).message, 'm');
 });
 
+test('routes imagesNeeded with its files, and passes commit its images', async () => {
+    const seen = {};
+    const engine = {
+        ...fakeEngine,
+        imagesNeeded: async (msg) => ({ paths: msg.files.map((f) => f.path) }),
+        commit: async (msg) => {
+            seen.images = msg.images;
+            return { committed: true };
+        },
+    };
+    const handler = makeMessageHandler(engine, fakeAuth);
+    const needed = await call(handler, { op: 'imagesNeeded', files: [{ path: 'a.py', contents: '' }] });
+    assert.deepEqual(needed.paths, ['a.py']);
+    await call(handler, { op: 'commit', files: [], message: 'm', images: [{ path: 'a.py', base64: 'AA==' }] });
+    assert.deepEqual(seen.images, [{ path: 'a.py', base64: 'AA==' }]);
+});
+
 test('routes history and filesAt to the engine with their arguments', async () => {
     const handler = makeMessageHandler(fakeEngine, fakeAuth);
     assert.equal((await call(handler, { op: 'history', depth: 5 })).depth, 5);

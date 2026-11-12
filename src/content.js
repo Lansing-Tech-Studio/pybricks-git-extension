@@ -190,14 +190,10 @@ async function commit(btn, message) {
     try {
         if (!(await ensureConfigured(btn, original))) return;
 
-        const data = await pageRequest('list-files');
-        const files = data.contents.map((c) => ({
-            path: c.path,
-            contents: c.contents,
-        }));
-        console.log(`[pybricks-git] committing ${files.length} file(s)`);
+        const { files, images } = await takeBlockPictures(btn, await readEditorFiles());
+        console.log(`[pybricks-git] committing ${files.length} file(s), ${images.length} picture(s)`);
 
-        const result = await serverRequest('commit', { files, message });
+        const result = await serverRequest('commit', { files, message, images });
         console.log('[pybricks-git] commit result:', result);
         if (result.preserved && result.preserved.length) {
             console.warn(
@@ -236,6 +232,60 @@ async function commit(btn, message) {
         setTimeout(() => (btn.textContent = original), 3000);
     } finally {
         btn.disabled = false;
+    }
+}
+
+async function readEditorFiles() {
+    const data = await pageRequest('list-files');
+    return data.contents.map((c) => ({ path: c.path, contents: c.contents }));
+}
+
+// Pybricks keeps its block-coding license in localStorage under this key.
+// Without a valid one, opening a block program raises the "Enable block coding"
+// dialog, so the picture pass must not run (test/e2e/blocks-screenshot-dom.md).
+function blockCodingEnabled() {
+    try {
+        const license = JSON.parse(localStorage.getItem('pybricks.license'));
+        return !!(license && license.signature && license.expiryDate && new Date(license.expiryDate) > new Date());
+    } catch {
+        return false;
+    }
+}
+
+// Takes a picture of every block program this Commit wants one for (see
+// "Block-program pictures" in CLAUDE.md). Resolves {files, images} and never
+// throws: pictures must not stop a Commit. `files` is re-read after the pass,
+// because opening a block program makes Pybricks regenerate and re-save it, and
+// a picture has to be committed with the contents it was taken from.
+async function takeBlockPictures(btn, files) {
+    try {
+        const hasBlocks = files.some((f) => typeof f.contents === 'string' && f.contents.startsWith(BLOCKS_SENTINEL));
+        if (!hasBlocks || !blockCodingEnabled()) return { files, images: [] };
+        const { paths } = await serverRequest('imagesNeeded', { files });
+        if (!paths.length) return { files, images: [] };
+
+        btn.textContent = 'Taking pictures…';
+        const shot = await pageRequest('capture-block-images', { paths });
+        if (shot.skipped.length) console.warn('[pybricks-git] no picture taken for:', shot.skipped);
+
+        // Pybricks saves a moment after the editor settles: wait for two reads to agree.
+        let settled = await readEditorFiles();
+        for (let i = 0; i < 10; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            const again = await readEditorFiles();
+            const same = JSON.stringify(again) === JSON.stringify(settled);
+            settled = again;
+            if (same) break;
+        }
+        // ponytail: every picture rides in one runtime message (64 MB cap, ~150
+        // programs); send them in batches if a team ever gets there.
+        const images = shot.images.map((i) => ({ path: i.path, base64: i.dataUrl.split(',')[1] }));
+        return { files: settled, images };
+    } catch (err) {
+        console.warn('[pybricks-git] could not take block pictures:', err);
+        return { files, images: [] };
+    } finally {
+        btn.textContent = 'Committing…';
     }
 }
 

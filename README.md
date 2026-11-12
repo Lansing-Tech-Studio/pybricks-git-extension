@@ -10,7 +10,7 @@ It works equally well for block-based programs and Python programs — block fil
 
 ## Current capabilities
 
-- **Commit button** in the editor toolbar — prompts for a commit message (blank = auto-timestamped), then commits *and pushes* every file from the editor straight to your team's GitHub fork.
+- **Commit button** in the editor toolbar — prompts for a commit message (blank = auto-timestamped), then commits *and pushes* every file from the editor straight to your team's GitHub fork. Each block program also gets a **picture of its blocks** (`mission_01.png` next to `mission_01.py`), so the program is readable on GitHub. Pictures need a Pybricks block-coding licence on the machine that commits; without one the Commit still goes through, just without them.
 - **Pull button** — fetches the fork and applies its files back into the editor: adds new files, updates changed ones, deletes removed ones. Monaco scroll/cursor state and file identities (UUIDs) are preserved on update.
 - **History button** — opens a panel listing the fork's commits with GitHub-style diffs of the programs. Compare any commit to what's in the editor now (uncommitted work included), or step through what each commit changed, and **restore** an older version of a file into the editor with one button. Block programs are diffed on their generated Python, with a "blocks changed" marker.
 - **Works on both program types** — Python and block programs round-trip identically; the extension treats the file body as opaque text.
